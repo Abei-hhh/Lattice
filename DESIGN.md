@@ -1,4 +1,4 @@
-# Vpn_Monitor - Windows IP 状态悬浮窗应用设计文档
+﻿# Vpn_Monitor - Windows IP 状态悬浮窗应用设计文档
 
 ## 1. 项目概述
 
@@ -255,7 +255,7 @@ main()
 |--------|------|------|
 | `Ctrl+Alt+H` | 切换悬浮窗显示/隐藏 | 隐藏后悬浮条不可见，后台继续检测 |
 | `Ctrl+Alt+I` | 打开 IP 查询工具窗口 | 弹出独立窗口，输入任意 IP 查询归属地 |
-| `Ctrl+Alt+Q` | 退出程序 | 唯一的退出方式（无托盘无关闭按钮） |
+| `Ctrl+Alt+Shift+K` | 退出程序 | 唯一的退出方式（无托盘无关闭按钮） |
 
 快捷键通过 Win32 `RegisterHotKey` 注册，全局生效，即使应用窗口不在焦点也能响应。
 
@@ -329,8 +329,8 @@ show_isp = true
 toggle_visibility = "ctrl+alt+h"
 # 打开 IP 查询工具窗口 (Ctrl+Alt+I)
 open_lookup = "ctrl+alt+i"
-# 退出程序 (Ctrl+Alt+Q)
-quit = "ctrl+alt+q"
+# 退出程序 (Ctrl+Alt+Shift+K)
+quit = "Ctrl+Alt+Shift+K"
 
 [network]
 # 请求超时（秒）
@@ -380,7 +380,7 @@ struct AppConfig {
     show_isp: bool,
     hotkey_toggle: String,    // "ctrl+alt+h"
     hotkey_lookup: String,    // "ctrl+alt+i"
-    hotkey_quit: String,      // "ctrl+alt+q"
+    hotkey_quit: String,      // "Ctrl+Alt+Shift+K"
     timeout: u64,
     max_retries: u32,
     proxy: Option<String>,
@@ -421,7 +421,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
 
 | 方式 | 操作 |
 |------|------|
-| 快捷键退出 | `Ctrl+Alt+Q` |
+| 快捷键退出 | `Ctrl+Alt+Shift+K` |
 | 任务管理器 | 在"详细信息"页中结束 `vpn-monitor.exe` 进程 |
 | 命令行 | `taskkill /IM vpn-monitor.exe` |
 
