@@ -9,9 +9,11 @@ use tokio::sync::mpsc;
 
 mod config;
 mod gui;
+mod monitor;
 mod network;
 
 use gui::render::{CheckStatus, IpUpdate, OverlayState, SharedState};
+use gui::window::UiUpdate;
 use network::geo_lookup::{self, GeoLookupOutcome};
 use network::ip_fetcher::{self, IpFetchOutcome};
 
@@ -39,7 +41,6 @@ fn main() {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        // 日志超过 5MB 时自动清空
         const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
         if let Ok(meta) = std::fs::metadata(&log_path) {
             if meta.len() > MAX_LOG_SIZE {
@@ -49,7 +50,7 @@ fn main() {
 
         let mut log_file = std::fs::File::create(&log_path).expect("Failed to create log file");
         use std::io::Write;
-        let _ = log_file.write_all(&[0xEF, 0xBB, 0xBF]); // UTF-8 BOM
+        let _ = log_file.write_all(&[0xEF, 0xBB, 0xBF]);
         tracing_subscriber::fmt()
             .with_writer(std::sync::Mutex::new(log_file))
             .with_target(false)
@@ -78,17 +79,20 @@ fn main() {
 
     let client = client_builder.build().expect("Failed to build HTTP client");
 
+    let has_proxy = config.proxy.is_some();
     let state: SharedState = Arc::new(Mutex::new(OverlayState {
-        show_isp: config.show_isp,
+        has_proxy,
         opacity: config.opacity,
         ..Default::default()
     }));
 
-    let (ip_tx, ip_rx) = mpsc::unbounded_channel::<IpUpdate>();
+    let (update_tx, update_rx) = mpsc::unbounded_channel::<UiUpdate>();
 
+    // IP poll task
     let poll_client = client.clone();
     let check_interval = config.check_interval;
     let max_retries = config.max_retries;
+    let ip_tx = update_tx.clone();
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     rt.spawn(async move {
@@ -113,10 +117,8 @@ fn main() {
                     let ip_changed = last_ip.as_ref() != Some(&ip);
                     tracing::info!(
                         "[poll#{}] IP获取成功: ip={}, last_ip={}, ip_changed={}",
-                        poll_count,
-                        ip,
-                        last_ip.as_deref().unwrap_or("None"),
-                        ip_changed
+                        poll_count, ip,
+                        last_ip.as_deref().unwrap_or("None"), ip_changed
                     );
 
                     let (geo, geo_rate_limited) = if ip_changed {
@@ -125,26 +127,23 @@ fn main() {
                         match geo_lookup::lookup_geo(&poll_client, &ip, timeout).await {
                             GeoLookupOutcome::Ok(g) => {
                                 tracing::info!(
-                                    "[poll#{}] 归属地查询成功: {} {} {} (ISP: {})",
-                                    poll_count, g.country, g.region, g.city, g.isp
+                                    "[poll#{}] 归属地查询成功: {} {} (ISP: {})",
+                                    poll_count, g.country, g.city, g.isp
                                 );
                                 last_geo = Some(g.clone());
                                 (Some(g), false)
                             }
                             GeoLookupOutcome::RateLimited => {
-                                tracing::warn!("[poll#{}] 归属地查询被限流，使用缓存: {:?}", poll_count, last_geo);
+                                tracing::warn!("[poll#{}] 归属地查询被限流，使用缓存", poll_count);
                                 (last_geo.clone(), true)
                             }
                             GeoLookupOutcome::Failed => {
-                                tracing::warn!("[poll#{}] 归属地查询失败，使用缓存: {:?}", poll_count, last_geo);
+                                tracing::warn!("[poll#{}] 归属地查询失败，使用缓存", poll_count);
                                 (last_geo.clone(), false)
                             }
                         }
                     } else {
-                        tracing::info!(
-                            "[poll#{}] IP未变更，使用缓存归属地: {:?}",
-                            poll_count, last_geo
-                        );
+                        tracing::info!("[poll#{}] IP未变更，使用缓存归属地", poll_count);
                         (last_geo.clone(), false)
                     };
 
@@ -169,53 +168,47 @@ fn main() {
                         last_ip = Some(ip);
                     }
 
-                    let _ = ip_tx.send(update);
+                    let _ = ip_tx.send(UiUpdate::Ip(update));
                 }
                 IpFetchOutcome::RateLimited => {
-                    tracing::warn!(
-                        "[poll#{}] IP源被限流, last_ip={:?}, last_geo={:?}",
-                        poll_count, last_ip, last_geo
-                    );
-                    let _ = ip_tx.send(IpUpdate {
+                    tracing::warn!("[poll#{}] IP源被限流", poll_count);
+                    let _ = ip_tx.send(UiUpdate::Ip(IpUpdate {
                         ip: last_ip.clone(),
                         geo: last_geo.clone(),
                         status: CheckStatus::ApiLimited,
-                    });
+                    }));
                     current_interval = check_interval.max(60);
-                    tracing::warn!("[poll#{}] 限流降频至 {}s", poll_count, current_interval);
                 }
                 IpFetchOutcome::Failed => {
                     consecutive_failures += 1;
                     tracing::warn!(
-                        "[poll#{}] IP获取失败 (连续{}次), last_ip={:?}, last_geo={:?}",
-                        poll_count, consecutive_failures, last_ip, last_geo
+                        "[poll#{}] IP获取失败 (连续{}次)", poll_count, consecutive_failures
                     );
                     if consecutive_failures >= max_retries {
-                        let _ = ip_tx.send(IpUpdate {
+                        let _ = ip_tx.send(UiUpdate::Ip(IpUpdate {
                             ip: None,
                             geo: None,
                             status: CheckStatus::NetworkError,
-                        });
+                        }));
                     }
-
                     current_interval = (current_interval * 2).min(300);
-                    tracing::warn!(
-                        "[poll#{}] 退避至 {}s",
-                        poll_count, current_interval
-                    );
                 }
             }
 
-            tracing::info!(
-                "[poll#{}] === 检测完成，下次间隔 {}s ===",
-                poll_count, current_interval
-            );
-
+            tracing::info!("[poll#{}] === 检测完成，下次间隔 {}s ===", poll_count, current_interval);
             tokio::time::sleep(Duration::from_secs(current_interval)).await;
         }
     });
 
-    gui::window::create_and_run(&config, state, ip_rx, client);
+    // System monitor task
+    let monitor_tx = update_tx.clone();
+    rt.spawn(async move {
+        monitor::monitor_loop(monitor_tx).await;
+    });
+
+    drop(update_tx); // All senders cloned into tasks, drop the original
+
+    gui::window::create_and_run(&config, state, update_rx, client);
 
     tracing::info!("Vpn_Monitor exiting...");
 }

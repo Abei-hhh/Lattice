@@ -25,6 +25,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 dirs = "5"
+sysinfo = "0.33"
 clap = { version = "4", features = ["derive"] }
 
 [profile.release]

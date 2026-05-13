@@ -2,16 +2,22 @@ use tokio::sync::mpsc;
 use windows::core::s;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL,
+    DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleA;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::config::AppConfig;
+use crate::monitor::MonitorSample;
 
 use super::hotkey;
-use super::render::{self, IpUpdate, SharedState};
+use super::render::{self, IpUpdate, SharedState, ROW_HEIGHT};
+
+pub enum UiUpdate {
+    Ip(IpUpdate),
+    Monitor(MonitorSample),
+}
 
 struct WindowContext {
     state: SharedState,
@@ -25,14 +31,14 @@ struct WindowContext {
 struct SendHwnd(usize);
 unsafe impl Send for SendHwnd {}
 
-const WIN_WIDTH: i32 = 500;
-const WIN_HEIGHT: i32 = 38;
-const WIN_Y_OFFSET: i32 = 8; // distance from top of screen
+const WIN_WIDTH: i32 = 620;
+const WIN_HEIGHT: i32 = ROW_HEIGHT * 2;
+const WIN_Y_OFFSET: i32 = 8;
 
 pub fn create_and_run(
     config: &AppConfig,
     state: SharedState,
-    mut rx: mpsc::UnboundedReceiver<IpUpdate>,
+    mut rx: mpsc::UnboundedReceiver<UiUpdate>,
     client: reqwest::Client,
 ) {
     unsafe {
@@ -40,12 +46,14 @@ pub fn create_and_run(
         let hinstance: HINSTANCE = hmodule.into();
         let class_name = s!("VpnMonitorOverlay");
 
+        let bg_brush = CreateSolidBrush(render::BG_COLOR);
+
         let wc = WNDCLASSA {
             hInstance: hinstance,
             lpszClassName: class_name,
             lpfnWndProc: Some(window_proc),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            hbrBackground: GetSysColorBrush(COLOR_WINDOW),
+            hbrBackground: bg_brush,
             ..Default::default()
         };
 
@@ -91,8 +99,7 @@ pub fn create_and_run(
             }
         };
 
-        // Smooth Win11 rounded corners via DWM (no jagged region clip).
-        let pref = DWMWCP_ROUNDSMALL;
+        let pref = DWMWCP_ROUND;
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -125,13 +132,22 @@ pub fn create_and_run(
 
             loop {
                 match rx.try_recv() {
-                    Ok(update) => {
+                    Ok(UiUpdate::Ip(update)) => {
                         tracing::info!(
-                            "[UI] 收到更新: ip={:?}, geo={:?}, status={:?}",
+                            "[UI] 收到IP更新: ip={:?}, geo={:?}, status={:?}",
                             update.ip, update.geo, update.status
                         );
                         let mut s = state.lock().unwrap();
                         s.current_update = update;
+                        drop(s);
+                        let _ = InvalidateRect(Some(hwnd), None, true);
+                    }
+                    Ok(UiUpdate::Monitor(sample)) => {
+                        let mut s = state.lock().unwrap();
+                        s.cpu_usage = sample.cpu_usage;
+                        s.mem_usage = sample.mem_usage;
+                        s.net_up = sample.net_upload_bps;
+                        s.net_down = sample.net_download_bps;
                         drop(s);
                         let _ = InvalidateRect(Some(hwnd), None, true);
                     }
@@ -182,7 +198,6 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         WM_ERASEBKGND => {
-            // Prevent flicker - we handle all drawing in WM_PAINT
             LRESULT(1)
         }
         WM_HOTKEY => {

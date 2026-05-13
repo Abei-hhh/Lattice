@@ -4,19 +4,18 @@ use windows::Win32::Graphics::Gdi::*;
 
 use crate::network::geo_lookup::GeoInfo;
 
-// Material Design Dark Theme
-pub const BG_COLOR: COLORREF = COLORREF(0x00_2D_2D_2D); // #2D2D2D
+pub const BG_COLOR: COLORREF = COLORREF(0x00_2D_2D_2D);
 const TEXT_PRIMARY: COLORREF = COLORREF(0x00_FF_FF_FF);
 const TEXT_SECONDARY: COLORREF = COLORREF(0x00_B3_B3_B0);
-const ACCENT_GREEN: COLORREF = COLORREF(0x00_50_AF_CA);
+const TEXT_DIM: COLORREF = COLORREF(0x00_88_88_88);
+const ACCENT_GREEN: COLORREF = COLORREF(0x00_50_AF_4C);
 const ACCENT_RED: COLORREF = COLORREF(0x00_36_43_F4);
-// Checking: vivid blue (#2196F3) — distinct from the orange rate-limited state.
 const ACCENT_BLUE: COLORREF = COLORREF(0x00_F3_96_21);
-// ApiLimited: saturated orange (#FF6F00) — clearly hotter than the blue.
 const ACCENT_ORANGE: COLORREF = COLORREF(0x00_00_6F_FF);
 const SEPARATOR_COLOR: COLORREF = COLORREF(0x00_55_55_55);
 
 const LWA_ALPHA_RAW: u32 = 0x02;
+pub const ROW_HEIGHT: i32 = 26;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckStatus {
@@ -39,6 +38,11 @@ pub struct OverlayState {
     pub visible: bool,
     pub show_isp: bool,
     pub opacity: f32,
+    pub has_proxy: bool,
+    pub cpu_usage: f32,
+    pub mem_usage: f32,
+    pub net_up: u64,
+    pub net_down: u64,
 }
 
 impl Default for OverlayState {
@@ -52,6 +56,11 @@ impl Default for OverlayState {
             visible: true,
             show_isp: true,
             opacity: 0.92,
+            has_proxy: false,
+            cpu_usage: 0.0,
+            mem_usage: 0.0,
+            net_up: 0,
+            net_down: 0,
         }
     }
 }
@@ -67,94 +76,95 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
         let mut ps = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut ps);
 
-        // Fill background
         let bg_brush = CreateSolidBrush(BG_COLOR);
         let full_rect = RECT { left: 0, top: 0, right: width, bottom: height };
         let _ = FillRect(hdc, &full_rect, bg_brush);
         let _ = DeleteObject(bg_brush.into());
 
-        let _ = SetBkMode(hdc, BACKGROUND_MODE(1)); // TRANSPARENT
+        let _ = SetBkMode(hdc, BACKGROUND_MODE(1));
 
-        // Font: Segoe UI 13px
         let font = CreateFontW(
-            -13, 0, 0, 0,
+            -12, 0, 0, 0,
             FW_NORMAL.0 as i32,
             0, 0, 0,
             DEFAULT_CHARSET,
             FONT_OUTPUT_PRECISION(0),
             FONT_CLIP_PRECISION(0),
-            FONT_QUALITY(0),
+            FONT_QUALITY(6), // CLEARTYPE_QUALITY
             DEFAULT_PITCH.0 as u32,
             windows::core::w!("Segoe UI"),
         );
         let old_font = SelectObject(hdc, font.into());
 
         let update = &state.current_update;
+        let max_x = width - 10;
 
-        // Status dot
+        // === Row 1: Status dot + IP + Location + Proxy ===
         let dot_color = match update.status {
             CheckStatus::Success => ACCENT_GREEN,
             CheckStatus::NetworkError => ACCENT_RED,
             CheckStatus::Checking => ACCENT_BLUE,
             CheckStatus::ApiLimited => ACCENT_ORANGE,
         };
-        let dot_cx = 18;
-        let dot_cy = height / 2;
-        let dot_r: i32 = 4;
-        let dot_brush = CreateSolidBrush(dot_color);
-        let dot_pen = CreatePen(PS_SOLID, 1, dot_color);
-        let old_pen = SelectObject(hdc, dot_pen.into());
-        let old_brush = SelectObject(hdc, dot_brush.into());
-        let _ = Ellipse(hdc, dot_cx - dot_r, dot_cy - dot_r, dot_cx + dot_r, dot_cy + dot_r);
-        let _ = SelectObject(hdc, old_brush);
-        let _ = SelectObject(hdc, old_pen);
-        let _ = DeleteObject(dot_brush.into());
-        let _ = DeleteObject(dot_pen.into());
+        draw_dot(hdc, 18, ROW_HEIGHT / 2, 4, dot_color);
 
         let mut x: i32 = 30;
 
         match &update.status {
             CheckStatus::Checking => {
-                x = draw_text(hdc, "检测中...", x, height, ACCENT_BLUE);
+                x = draw_text(hdc, "检测中...", x, 0, ROW_HEIGHT, ACCENT_BLUE, max_x);
             }
             CheckStatus::NetworkError => {
-                x = draw_text(hdc, "网络不可达", x, height, ACCENT_RED);
+                x = draw_text(hdc, "网络不可达", x, 0, ROW_HEIGHT, ACCENT_RED, max_x);
             }
             CheckStatus::ApiLimited => {
-                // Still show the last-known IP so the user has context while waiting.
                 if let Some(ip) = update.ip.as_deref() {
-                    x = draw_text(hdc, ip, x, height, TEXT_PRIMARY);
-                    x = draw_separator(hdc, x, height);
+                    x = draw_text(hdc, ip, x, 0, ROW_HEIGHT, TEXT_PRIMARY, max_x);
+                    x = draw_sep(hdc, x, 0, ROW_HEIGHT);
                 }
-                x = draw_text(hdc, "查询受限", x, height, ACCENT_ORANGE);
+                x = draw_text(hdc, "查询受限", x, 0, ROW_HEIGHT, ACCENT_ORANGE, max_x);
             }
             CheckStatus::Success => {
-                // IP
                 let ip_str = update.ip.as_deref().unwrap_or("--");
-                x = draw_text(hdc, ip_str, x, height, TEXT_PRIMARY);
+                x = draw_text(hdc, ip_str, x, 0, ROW_HEIGHT, TEXT_PRIMARY, max_x);
+                x = draw_sep(hdc, x, 0, ROW_HEIGHT);
 
-                // Separator line
-                x = draw_separator(hdc, x, height);
-
-                // Location
                 if let Some(geo) = &update.geo {
                     let loc = format_location(geo);
-                    x = draw_text(hdc, &loc, x, height, TEXT_SECONDARY);
+                    x = draw_text(hdc, &loc, x, 0, ROW_HEIGHT, TEXT_SECONDARY, max_x);
                 } else {
-                    x = draw_text(hdc, "--", x, height, TEXT_SECONDARY);
-                }
-
-                // ISP
-                if state.show_isp {
-                    if let Some(geo) = &update.geo {
-                        if !geo.isp.is_empty() {
-                            x = draw_separator(hdc, x, height);
-                            draw_text(hdc, &geo.isp, x, height, TEXT_SECONDARY);
-                        }
-                    }
+                    x = draw_text(hdc, "--", x, 0, ROW_HEIGHT, TEXT_SECONDARY, max_x);
                 }
             }
         }
+
+        if !state.has_proxy {
+            draw_text(hdc, "未设置代理", x + 12, 0, ROW_HEIGHT, TEXT_DIM, max_x);
+        }
+
+        // === Row separator ===
+        {
+            let sep_brush = CreateSolidBrush(SEPARATOR_COLOR);
+            let sep_rect = RECT { left: 10, top: ROW_HEIGHT - 1, right: width - 10, bottom: ROW_HEIGHT };
+            let _ = FillRect(hdc, &sep_rect, sep_brush);
+            let _ = DeleteObject(sep_brush.into());
+        }
+
+        // === Row 2: Net speed + CPU + Memory ===
+        let y2 = ROW_HEIGHT;
+        let mut x2: i32 = 18;
+
+        x2 = draw_text(hdc, "\u{2191}", x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+        x2 = draw_text(hdc, &format_speed(state.net_up), x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+
+        x2 = draw_text(hdc, "\u{2193}", x2 + 6, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+        x2 = draw_text(hdc, &format_speed(state.net_down), x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+
+        x2 = draw_sep(hdc, x2 + 2, y2, ROW_HEIGHT);
+        x2 = draw_text(hdc, &format!("CPU {:.0}%", state.cpu_usage), x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+
+        x2 = draw_sep(hdc, x2 + 2, y2, ROW_HEIGHT);
+        draw_text(hdc, &format!("内存 {:.0}%", state.mem_usage), x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
 
         let _ = SelectObject(hdc, old_font);
         let _ = DeleteObject(font.into());
@@ -167,44 +177,70 @@ fn format_location(geo: &GeoInfo) -> String {
     if !geo.country.is_empty() {
         parts.push(&geo.country);
     }
-    if !geo.region.is_empty() && geo.region != geo.city {
-        parts.push(&geo.region);
-    }
     if !geo.city.is_empty() {
         parts.push(&geo.city);
     }
-    parts.join(" · ")
+    if parts.is_empty() { "--".to_string() } else { parts.join(" · ") }
 }
 
-unsafe fn draw_text(hdc: HDC, text: &str, x: i32, height: i32, color: COLORREF) -> i32 {
+fn format_speed(bps: u64) -> String {
+    if bps >= 1_000_000 {
+        format!("{:.1}MB/s", bps as f64 / 1_000_000.0)
+    } else if bps >= 1_000 {
+        format!("{:.1}KB/s", bps as f64 / 1_000.0)
+    } else {
+        format!("{}B/s", bps)
+    }
+}
+
+unsafe fn draw_dot(hdc: HDC, cx: i32, cy: i32, r: i32, color: COLORREF) {
+    let brush = CreateSolidBrush(color);
+    let pen = CreatePen(PS_SOLID, 1, color);
+    let old_pen = SelectObject(hdc, pen.into());
+    let old_brush = SelectObject(hdc, brush.into());
+    let _ = Ellipse(hdc, cx - r, cy - r, cx + r, cy + r);
+    let _ = SelectObject(hdc, old_brush);
+    let _ = SelectObject(hdc, old_pen);
+    let _ = DeleteObject(brush.into());
+    let _ = DeleteObject(pen.into());
+}
+
+unsafe fn draw_text(hdc: HDC, text: &str, x: i32, y: i32, h: i32, color: COLORREF, max_x: i32) -> i32 {
     let _ = SetTextColor(hdc, color);
     let mut wbuf: Vec<u16> = text.encode_utf16().collect();
 
-    // Measure the rendered width with the currently selected font.
     let mut measure = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-    let _ = DrawTextW(
-        hdc,
-        &mut wbuf,
-        &mut measure,
-        DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
-    );
+    let _ = DrawTextW(hdc, &mut wbuf, &mut measure, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
     let text_w = measure.right - measure.left;
 
-    let mut draw_rect = RECT { left: x, top: 0, right: x + text_w, bottom: height };
-    let _ = DrawTextW(
-        hdc,
-        &mut wbuf,
-        &mut draw_rect,
-        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
-    );
+    if x + text_w > max_x {
+        let suffix: Vec<u16> = "...".encode_utf16().collect();
+        let mut truncated = wbuf.clone();
+        while truncated.len() > 1 {
+            truncated.pop();
+            let mut combined = truncated.clone();
+            combined.extend_from_slice(&suffix);
+            let mut m = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            let _ = DrawTextW(hdc, &mut combined, &mut m, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+            if x + m.right - m.left <= max_x {
+                let mut draw_rect = RECT { left: x, top: y, right: max_x, bottom: y + h };
+                let _ = DrawTextW(hdc, &mut combined, &mut draw_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+                return max_x;
+            }
+        }
+        return x;
+    }
+
+    let mut draw_rect = RECT { left: x, top: y, right: x + text_w, bottom: y + h };
+    let _ = DrawTextW(hdc, &mut wbuf, &mut draw_rect, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
     x + text_w + 6
 }
 
-unsafe fn draw_separator(hdc: HDC, x: i32, height: i32) -> i32 {
-    let sep_brush = CreateSolidBrush(SEPARATOR_COLOR);
-    let sep_rect = RECT { left: x, top: height / 2 - 7, right: x + 1, bottom: height / 2 + 7 };
-    let _ = FillRect(hdc, &sep_rect, sep_brush);
-    let _ = DeleteObject(sep_brush.into());
+unsafe fn draw_sep(hdc: HDC, x: i32, y: i32, h: i32) -> i32 {
+    let brush = CreateSolidBrush(SEPARATOR_COLOR);
+    let rect = RECT { left: x, top: y + h / 2 - 6, right: x + 1, bottom: y + h / 2 + 6 };
+    let _ = FillRect(hdc, &rect, brush);
+    let _ = DeleteObject(brush.into());
     x + 12
 }
 
