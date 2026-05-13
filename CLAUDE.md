@@ -7,13 +7,13 @@ Windows 11 后台悬浮窗应用，Rust 编写。顶部显示当前公网 IP + �
 ## 架构
 
 ```
-main.rs          → 入口：加载配置、启动 tokio runtime、spawn 网络轮询、GUI 消息循环
+main.rs          → 入口：加载配置、按需初始化日志、启动 tokio runtime、spawn 网络轮询、GUI 消息循环
 config.rs        → AppConfig 结构体 + TOML 加载 + 快捷键解析
 gui/
   window.rs      → 悬浮窗口创建 + 消息循环（PeekMessage 轮询 + shutdown channel）
   render.rs      → GDI 绘制：背景、状态灯、IP 文本、归属地文本
   hotkey.rs      → RegisterHotKey / UnregisterHotKey（三个全局热键）
-  lookup_dialog.rs → IP 查询工具窗口（CreateWindowExA + WM_COMMAND）
+  lookup_dialog.rs → IP 查询工具窗口（CreateWindowExW Unicode 版 + WM_COMMAND）
 network/
   ip_fetcher.rs  → 多源并发获取公网 IP（ipify / ip.sb / ifconfig.me）
   geo_lookup.rs  → IP 归属地查询（ip-api.com 主用 / ipwho.is 备用）
@@ -25,6 +25,9 @@ network/
 - **HWND 非 Send**：跨线程传递 HWND 时用 `usize` 中转
 - **PeekMessage 轮询**：主循环手动轮询而非 GetMessage 阻塞，以便同时处理 tokio channel
 - **clipboard/layered**：使用 `extern "system"` 直接声明，绕过 crate feature 缺失
+- **Unicode API**：所有窗口和对话框使用 W（宽字符）变体，避免中文乱码
+- **归属地缓存**：轮询循环中维护 `last_geo`，IP 未变时复用缓存，避免 UI 丢失归属地信息
+- **日志系统**：通过 `enable_log` 配置开关，日志文件带 UTF-8 BOM，超过 5MB 启动时自动清空
 
 ## 常用命令
 

@@ -25,17 +25,41 @@ struct Args {
 }
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_target(false)
-        .init();
-
     let args = Args::parse();
     let config_path = args.config.map(std::path::PathBuf::from);
     let config = config::load_config(config_path);
 
-    tracing::info!("Vpn_Monitor starting...");
-    tracing::info!("Check interval: {}s", config.check_interval);
+    if config.enable_log {
+        let log_path = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("Vpn_Monitor")
+            .join("vpn-monitor.log");
+
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        // 日志超过 5MB 时自动清空
+        const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
+        if let Ok(meta) = std::fs::metadata(&log_path) {
+            if meta.len() > MAX_LOG_SIZE {
+                let _ = std::fs::remove_file(&log_path);
+            }
+        }
+
+        let mut log_file = std::fs::File::create(&log_path).expect("Failed to create log file");
+        use std::io::Write;
+        let _ = log_file.write_all(&[0xEF, 0xBB, 0xBF]); // UTF-8 BOM
+        tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(log_file))
+            .with_target(false)
+            .with_ansi(false)
+            .init();
+
+        tracing::info!("日志文件: {}", log_path.display());
+        tracing::info!("Vpn_Monitor starting...");
+        tracing::info!("Check interval: {}s", config.check_interval);
+    }
 
     let mut client_builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(config.timeout))
@@ -69,10 +93,15 @@ fn main() {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
     rt.spawn(async move {
         let mut last_ip: Option<String> = None;
+        let mut last_geo: Option<network::geo_lookup::GeoInfo> = None;
         let mut consecutive_failures: u32 = 0;
         let mut current_interval = check_interval;
+        let mut poll_count: u32 = 0;
 
         loop {
+            poll_count += 1;
+            tracing::info!("[poll#{}] === 开始第 {} 次检测 ===", poll_count, poll_count);
+
             let timeout = Duration::from_secs(5);
             let outcome = ip_fetcher::fetch_public_ip(&poll_client, timeout).await;
 
@@ -82,15 +111,41 @@ fn main() {
                     current_interval = check_interval;
 
                     let ip_changed = last_ip.as_ref() != Some(&ip);
+                    tracing::info!(
+                        "[poll#{}] IP获取成功: ip={}, last_ip={}, ip_changed={}",
+                        poll_count,
+                        ip,
+                        last_ip.as_deref().unwrap_or("None"),
+                        ip_changed
+                    );
+
                     let (geo, geo_rate_limited) = if ip_changed {
                         let timeout = Duration::from_secs(5);
+                        tracing::info!("[poll#{}] IP已变更，开始查询归属地...", poll_count);
                         match geo_lookup::lookup_geo(&poll_client, &ip, timeout).await {
-                            GeoLookupOutcome::Ok(g) => (Some(g), false),
-                            GeoLookupOutcome::RateLimited => (None, true),
-                            GeoLookupOutcome::Failed => (None, false),
+                            GeoLookupOutcome::Ok(g) => {
+                                tracing::info!(
+                                    "[poll#{}] 归属地查询成功: {} {} {} (ISP: {})",
+                                    poll_count, g.country, g.region, g.city, g.isp
+                                );
+                                last_geo = Some(g.clone());
+                                (Some(g), false)
+                            }
+                            GeoLookupOutcome::RateLimited => {
+                                tracing::warn!("[poll#{}] 归属地查询被限流，使用缓存: {:?}", poll_count, last_geo);
+                                (last_geo.clone(), true)
+                            }
+                            GeoLookupOutcome::Failed => {
+                                tracing::warn!("[poll#{}] 归属地查询失败，使用缓存: {:?}", poll_count, last_geo);
+                                (last_geo.clone(), false)
+                            }
                         }
                     } else {
-                        (None, false)
+                        tracing::info!(
+                            "[poll#{}] IP未变更，使用缓存归属地: {:?}",
+                            poll_count, last_geo
+                        );
+                        (last_geo.clone(), false)
                     };
 
                     let status = if geo_rate_limited {
@@ -105,6 +160,11 @@ fn main() {
                         status,
                     };
 
+                    tracing::info!(
+                        "[poll#{}] 发送UI更新: ip={:?}, geo={:?}, status={:?}",
+                        poll_count, update.ip, update.geo, update.status
+                    );
+
                     if ip_changed {
                         last_ip = Some(ip);
                     }
@@ -112,18 +172,24 @@ fn main() {
                     let _ = ip_tx.send(update);
                 }
                 IpFetchOutcome::RateLimited => {
-                    // Keep last known IP visible, just flag the status as limited.
+                    tracing::warn!(
+                        "[poll#{}] IP源被限流, last_ip={:?}, last_geo={:?}",
+                        poll_count, last_ip, last_geo
+                    );
                     let _ = ip_tx.send(IpUpdate {
                         ip: last_ip.clone(),
-                        geo: None,
+                        geo: last_geo.clone(),
                         status: CheckStatus::ApiLimited,
                     });
-                    // Brief cool-down so we don't hammer rate-limited endpoints.
                     current_interval = check_interval.max(60);
-                    tracing::warn!("IP sources rate-limited, cooling down to {}s", current_interval);
+                    tracing::warn!("[poll#{}] 限流降频至 {}s", poll_count, current_interval);
                 }
                 IpFetchOutcome::Failed => {
                     consecutive_failures += 1;
+                    tracing::warn!(
+                        "[poll#{}] IP获取失败 (连续{}次), last_ip={:?}, last_geo={:?}",
+                        poll_count, consecutive_failures, last_ip, last_geo
+                    );
                     if consecutive_failures >= max_retries {
                         let _ = ip_tx.send(IpUpdate {
                             ip: None,
@@ -134,12 +200,16 @@ fn main() {
 
                     current_interval = (current_interval * 2).min(300);
                     tracing::warn!(
-                        "IP fetch failed ({} consecutive), backing off to {}s",
-                        consecutive_failures,
-                        current_interval
+                        "[poll#{}] 退避至 {}s",
+                        poll_count, current_interval
                     );
                 }
             }
+
+            tracing::info!(
+                "[poll#{}] === 检测完成，下次间隔 {}s ===",
+                poll_count, current_interval
+            );
 
             tokio::time::sleep(Duration::from_secs(current_interval)).await;
         }

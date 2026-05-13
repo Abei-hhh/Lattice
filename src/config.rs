@@ -30,9 +30,12 @@ pub struct AppConfig {
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
     pub proxy: Option<String>,
+
+    #[serde(default)]
+    pub enable_log: bool,
 }
 
-fn default_check_interval() -> u64 { 30 }
+fn default_check_interval() -> u64 { 10 }
 fn default_true() -> bool { true }
 fn default_opacity() -> f32 { 0.85 }
 fn default_position() -> String { "top-center".to_string() }
@@ -40,7 +43,7 @@ fn default_timeout() -> u64 { 5 }
 fn default_max_retries() -> u32 { 3 }
 fn default_hotkey_toggle() -> String { "ctrl+alt+h".to_string() }
 fn default_hotkey_lookup() -> String { "ctrl+alt+i".to_string() }
-fn default_hotkey_quit() -> String { "ctrl+alt+q".to_string() }
+fn default_hotkey_quit() -> String { "ctrl+alt+shift+k".to_string() }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -57,6 +60,7 @@ impl Default for AppConfig {
             timeout: default_timeout(),
             max_retries: default_max_retries(),
             proxy: None,
+            enable_log: false,
         }
     }
 }

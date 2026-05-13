@@ -126,6 +126,10 @@ pub fn create_and_run(
             loop {
                 match rx.try_recv() {
                     Ok(update) => {
+                        tracing::info!(
+                            "[UI] 收到更新: ip={:?}, geo={:?}, status={:?}",
+                            update.ip, update.geo, update.status
+                        );
                         let mut s = state.lock().unwrap();
                         s.current_update = update;
                         drop(s);

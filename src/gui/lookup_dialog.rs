@@ -1,5 +1,4 @@
-use std::ffi::CString;
-use windows::core::{s, PCSTR};
+use windows::core::{s, w};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleA;
@@ -10,7 +9,6 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::network::geo_lookup;
 use crate::network::geo_lookup::GeoInfo;
 
-// Clipboard functions - use extern "system" since they may not be in the crate features
 #[allow(improper_ctypes)]
 extern "system" {
     fn OpenClipboard(hwnd: Option<HWND>) -> BOOL;
@@ -52,9 +50,9 @@ impl LookupDialog {
         unsafe {
             let hmodule = GetModuleHandleA(s!("vpn-monitor.exe")).unwrap_or_default();
             let hinstance: HINSTANCE = hmodule.into();
-            let class_name = s!("VpnMonitorLookup");
+            let class_name = w!("VpnMonitorLookup");
 
-            let wc = WNDCLASSA {
+            let wc = WNDCLASSW {
                 hInstance: hinstance,
                 lpszClassName: class_name,
                 lpfnWndProc: Some(dialog_proc),
@@ -63,12 +61,12 @@ impl LookupDialog {
                 ..Default::default()
             };
 
-            RegisterClassA(&wc);
+            RegisterClassW(&wc);
 
-            let hwnd = match CreateWindowExA(
+            let hwnd = match CreateWindowExW(
                 WINDOW_EX_STYLE::default(),
                 class_name,
-                s!("IP \u{5730}\u{5740}\u{67e5}\u{8be2}"),
+                w!("IP 地址查询"),
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
@@ -96,12 +94,12 @@ impl LookupDialog {
                 if !IsWindow(Some(hwnd)).as_bool() {
                     break;
                 }
-                let got_msg = GetMessageA(&mut msg, None, 0, 0);
+                let got_msg = GetMessageW(&mut msg, None, 0, 0);
                 if !got_msg.as_bool() {
                     break;
                 }
                 let _ = TranslateMessage(&msg);
-                let _ = DispatchMessageA(&msg);
+                let _ = DispatchMessageW(&msg);
             }
         }
     }
@@ -109,7 +107,7 @@ impl LookupDialog {
 
 fn format_geo_result(ip: &str, geo: &GeoInfo) -> String {
     format!(
-        "IP:     {}\n\u{56fd}\u{5bb6}:   {}\n\u{5730}\u{533a}:   {}\n\u{57ce}\u{5e02}:   {}\nISP:    {}",
+        "IP:     {}\n国家:   {}\n地区:   {}\n城市:   {}\nISP:    {}",
         ip, geo.country, geo.region, geo.city, geo.isp
     )
 }
@@ -128,6 +126,13 @@ fn center_window(hwnd: HWND) {
     }
 }
 
+fn set_wnd_text(hwnd: HWND, text: &str) {
+    unsafe {
+        let mut wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0u16)).collect();
+        let _ = SetWindowTextW(hwnd, windows::core::PCWSTR(wide.as_mut_ptr()));
+    }
+}
+
 unsafe extern "system" fn dialog_proc(
     hwnd: HWND,
     msg: u32,
@@ -136,61 +141,61 @@ unsafe extern "system" fn dialog_proc(
 ) -> LRESULT {
     match msg {
         WM_CREATE => {
-            let cs = lparam.0 as *const CREATESTRUCTA;
+            let cs = lparam.0 as *const CREATESTRUCTW;
             let dialog_ptr = (*cs).lpCreateParams as *mut LookupDialog;
             SetWindowLongPtrA(hwnd, GWLP_USERDATA, dialog_ptr as isize);
             let hinst: HINSTANCE = (*cs).hInstance;
 
             // Label
-            let _ = CreateWindowExA(
-                WINDOW_EX_STYLE::default(), s!("STATIC"),
-                s!("IP \u{5730}\u{5740}:"),
+            let _ = CreateWindowExW(
+                WINDOW_EX_STYLE::default(), w!("STATIC"),
+                w!("IP 地址:"),
                 WS_VISIBLE | WS_CHILD, 20, 20, 60, 20,
                 Some(hwnd), None, Some(hinst), None,
             );
 
             // Input edit
-            let input = CreateWindowExA(
-                WINDOW_EX_STYLE::default(), s!("EDIT"), s!(""),
+            let input = CreateWindowExW(
+                WINDOW_EX_STYLE::default(), w!("EDIT"), w!(""),
                 WS_VISIBLE | WS_CHILD | WS_BORDER | ES_AUTOHSCROLL_RAW,
                 85, 18, 210, 24, Some(hwnd),
                 Some(HMENU(ID_INPUT_EDIT as *mut _)), Some(hinst), None,
             ).unwrap_or_default();
 
             // Lookup button
-            let _ = CreateWindowExA(
-                WINDOW_EX_STYLE::default(), s!("BUTTON"),
-                s!("\u{67e5}\u{8be2}"),
+            let _ = CreateWindowExW(
+                WINDOW_EX_STYLE::default(), w!("BUTTON"),
+                w!("查询"),
                 WS_VISIBLE | WS_CHILD, 305, 17, 70, 26, Some(hwnd),
                 Some(HMENU(ID_LOOKUP_BTN as *mut _)), Some(hinst), None,
             );
 
             // Error text
-            let error = CreateWindowExA(
-                WINDOW_EX_STYLE::default(), s!("STATIC"), s!(""),
+            let error = CreateWindowExW(
+                WINDOW_EX_STYLE::default(), w!("STATIC"), w!(""),
                 WS_VISIBLE | WS_CHILD, 85, 46, 290, 20, Some(hwnd),
                 Some(HMENU(ID_ERROR_STATIC as *mut _)), Some(hinst), None,
             ).unwrap_or_default();
 
             // Result box
-            let result = CreateWindowExA(
-                WINDOW_EX_STYLE::default(), s!("STATIC"), s!(""),
+            let result = CreateWindowExW(
+                WINDOW_EX_STYLE::default(), w!("STATIC"), w!(""),
                 WS_VISIBLE | WS_CHILD, 20, 75, 355, 160, Some(hwnd),
                 Some(HMENU(ID_RESULT_STATIC as *mut _)), Some(hinst), None,
             ).unwrap_or_default();
 
             // Copy button
-            let _ = CreateWindowExA(
-                WINDOW_EX_STYLE::default(), s!("BUTTON"),
-                s!("\u{590d}\u{5236}\u{7ed3}\u{679c}"),
+            let _ = CreateWindowExW(
+                WINDOW_EX_STYLE::default(), w!("BUTTON"),
+                w!("复制结果"),
                 WS_VISIBLE | WS_CHILD, 100, 270, 90, 30, Some(hwnd),
                 Some(HMENU(ID_COPY_BTN as *mut _)), Some(hinst), None,
             );
 
             // Close button
-            let _ = CreateWindowExA(
-                WINDOW_EX_STYLE::default(), s!("BUTTON"),
-                s!("\u{5173}\u{95ed}"),
+            let _ = CreateWindowExW(
+                WINDOW_EX_STYLE::default(), w!("BUTTON"),
+                w!("关闭"),
                 WS_VISIBLE | WS_CHILD, 210, 270, 90, 30, Some(hwnd),
                 Some(HMENU(ID_CLOSE_BTN as *mut _)), Some(hinst), None,
             );
@@ -213,12 +218,10 @@ unsafe extern "system" fn dialog_proc(
                         let input_text = get_edit_text((*dialog_ptr).input_hwnd);
                         let trimmed = input_text.trim().to_string();
                         if trimmed.is_empty() {
-                            let cstr = CString::new("\u{8bf7}\u{8f93}\u{5165}IP\u{5730}\u{5740}").unwrap_or_default();
-                            let _ = SetWindowTextA((*dialog_ptr).error_hwnd, PCSTR(cstr.as_ptr() as *const u8));
+                            set_wnd_text((*dialog_ptr).error_hwnd, "请输入IP地址");
                         } else {
-                            let _ = SetWindowTextA((*dialog_ptr).error_hwnd, s!(""));
-                            let cstr = CString::new("\u{67e5}\u{8be2}\u{4e2d}...").unwrap_or_default();
-                            let _ = SetWindowTextA((*dialog_ptr).result_hwnd, PCSTR(cstr.as_ptr() as *const u8));
+                            set_wnd_text((*dialog_ptr).error_hwnd, "");
+                            set_wnd_text((*dialog_ptr).result_hwnd, "查询中...");
 
                             let client = (*dialog_ptr).client.clone();
                             let result_hwnd_raw = (*dialog_ptr).result_hwnd.0 as usize;
@@ -238,17 +241,16 @@ unsafe extern "system" fn dialog_proc(
                                         }
                                         geo_lookup::GeoLookupOutcome::RateLimited => {
                                             format!(
-                                                "IP: {}\n\u{67e5}\u{8be2}\u{53d7}\u{9650}（API \u{9650}\u{6d41}）",
+                                                "IP: {}\n查询受限（API 限流）",
                                                 trimmed
                                             )
                                         }
                                         geo_lookup::GeoLookupOutcome::Failed => {
-                                            format!("IP: {}\n\u{67e5}\u{8be2}\u{5931}\u{8d25}", trimmed)
+                                            format!("IP: {}\n查询失败", trimmed)
                                         }
                                     };
-                                    let cstr = CString::new(result_text).unwrap_or_default();
+                                    set_wnd_text(result_hwnd, &result_text);
                                     unsafe {
-                                        let _ = SetWindowTextA(result_hwnd, PCSTR(cstr.as_ptr() as *const u8));
                                         let _ = InvalidateRect(Some(result_hwnd), None, true);
                                     }
                                 }
@@ -273,19 +275,19 @@ unsafe extern "system" fn dialog_proc(
             LRESULT(0)
         }
         WM_DESTROY => LRESULT(0),
-        _ => DefWindowProcA(hwnd, msg, wparam, lparam),
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
 fn get_edit_text(hwnd: HWND) -> String {
     unsafe {
-        let len = GetWindowTextLengthA(hwnd) as usize;
+        let len = GetWindowTextLengthW(hwnd) as usize;
         if len == 0 {
             return String::new();
         }
-        let mut buf = vec![0u8; len + 1];
-        GetWindowTextA(hwnd, &mut buf);
-        String::from_utf8_lossy(&buf[..len]).to_string()
+        let mut buf = vec![0u16; len + 1];
+        GetWindowTextW(hwnd, &mut buf);
+        String::from_utf16_lossy(&buf[..len])
     }
 }
 
