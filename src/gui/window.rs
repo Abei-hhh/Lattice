@@ -12,7 +12,7 @@ use crate::config::AppConfig;
 use crate::monitor::MonitorSample;
 
 use super::hotkey;
-use super::render::{self, IpUpdate, SharedState, ROW_HEIGHT};
+use super::render::{self, IpUpdate, SharedState, WIN_HEIGHT};
 
 pub enum UiUpdate {
     Ip(IpUpdate),
@@ -24,15 +24,11 @@ struct WindowContext {
     shutdown_tx: mpsc::UnboundedSender<()>,
     client: reqwest::Client,
     lookup_dialog_open: bool,
-    win_width: i32,
-    win_height: i32,
 }
 
 struct SendHwnd(usize);
 unsafe impl Send for SendHwnd {}
 
-const WIN_WIDTH: i32 = 620;
-const WIN_HEIGHT: i32 = ROW_HEIGHT * 2;
 const WIN_Y_OFFSET: i32 = 8;
 
 pub fn create_and_run(
@@ -59,9 +55,6 @@ pub fn create_and_run(
 
         RegisterClassA(&wc);
 
-        let screen_width = GetSystemMetrics(SM_CXSCREEN);
-        let x = (screen_width - WIN_WIDTH) / 2;
-
         let mut ex_style = WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW;
         if config.click_through {
             ex_style |= WS_EX_TRANSPARENT;
@@ -74,18 +67,17 @@ pub fn create_and_run(
             shutdown_tx,
             client: client.clone(),
             lookup_dialog_open: false,
-            win_width: WIN_WIDTH,
-            win_height: WIN_HEIGHT,
         });
 
+        // Start with minimal width, will auto-size after first update
         let hwnd = match CreateWindowExA(
             ex_style,
             class_name,
             s!(""),
             WS_POPUP | WS_VISIBLE,
-            x,
+            0,
             WIN_Y_OFFSET,
-            WIN_WIDTH,
+            1,
             WIN_HEIGHT,
             None,
             None,
@@ -121,7 +113,9 @@ pub fn create_and_run(
                 status: render::CheckStatus::Checking,
             };
         }
-        let _ = InvalidateRect(Some(hwnd), None, true);
+
+        let mut current_width: i32 = 1;
+        let screen_width = GetSystemMetrics(SM_CXSCREEN);
 
         // Main message loop
         loop {
@@ -130,6 +124,8 @@ pub fn create_and_run(
                 Err(_) => {}
             }
 
+            let mut need_repaint = false;
+
             loop {
                 match rx.try_recv() {
                     Ok(UiUpdate::Ip(update)) => {
@@ -137,10 +133,8 @@ pub fn create_and_run(
                             "[UI] 收到IP更新: ip={:?}, geo={:?}, status={:?}",
                             update.ip, update.geo, update.status
                         );
-                        let mut s = state.lock().unwrap();
-                        s.current_update = update;
-                        drop(s);
-                        let _ = InvalidateRect(Some(hwnd), None, true);
+                        state.lock().unwrap().current_update = update;
+                        need_repaint = true;
                     }
                     Ok(UiUpdate::Monitor(sample)) => {
                         let mut s = state.lock().unwrap();
@@ -148,12 +142,30 @@ pub fn create_and_run(
                         s.mem_usage = sample.mem_usage;
                         s.net_up = sample.net_upload_bps;
                         s.net_down = sample.net_download_bps;
+                        s.proxy_enabled = sample.proxy_enabled;
                         drop(s);
-                        let _ = InvalidateRect(Some(hwnd), None, true);
+                        need_repaint = true;
                     }
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => break,
                 }
+            }
+
+            if need_repaint {
+                // Auto-size window to fit content
+                let s = state.lock().unwrap();
+                let hdc = GetDC(Some(hwnd));
+                let required = render::measure_required_width(hdc, &s);
+                ReleaseDC(Some(hwnd), hdc);
+                drop(s);
+
+                if required != current_width {
+                    current_width = required;
+                    let x = (screen_width - required) / 2;
+                    let _ = SetWindowPos(hwnd, None, x, WIN_Y_OFFSET, required, WIN_HEIGHT, SWP_NOZORDER);
+                }
+
+                let _ = InvalidateRect(Some(hwnd), None, true);
             }
 
             let mut msg = MSG::default();
@@ -192,8 +204,10 @@ unsafe extern "system" fn window_proc(
         WM_PAINT => {
             let ctx_ptr = GetWindowLongPtrA(hwnd, GWLP_USERDATA) as *mut WindowContext;
             if !ctx_ptr.is_null() {
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
                 let state = (*ctx_ptr).state.lock().unwrap();
-                render::paint_overlay(hwnd, &state, (*ctx_ptr).win_width, (*ctx_ptr).win_height);
+                render::paint_overlay(hwnd, &state, rect.right, rect.bottom);
             }
             LRESULT(0)
         }

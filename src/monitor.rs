@@ -9,6 +9,43 @@ pub struct MonitorSample {
     pub mem_usage: f32,
     pub net_upload_bps: u64,
     pub net_download_bps: u64,
+    pub proxy_enabled: bool,
+}
+
+#[link(name = "advapi32")]
+extern "system" {
+    fn RegGetValueW(
+        hkey: isize,
+        subkey: *const u16,
+        value: *const u16,
+        flags: u32,
+        dtype: *mut u32,
+        data: *mut u8,
+        size: *mut u32,
+    ) -> i32;
+}
+
+const HKEY_CURRENT_USER: isize = 0x80000001;
+const RRF_RT_REG_DWORD: u32 = 0x10;
+
+fn is_system_proxy_enabled() -> bool {
+    unsafe {
+        let subkey = windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings");
+        let value = windows::core::w!("ProxyEnable");
+        let mut data: u32 = 0;
+        let mut size = std::mem::size_of::<u32>() as u32;
+        let mut dtype = 0u32;
+
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            &mut dtype,
+            &mut data as *mut u32 as *mut u8,
+            &mut size,
+        ) == 0 && data != 0
+    }
 }
 
 pub async fn monitor_loop(tx: tokio::sync::mpsc::UnboundedSender<UiUpdate>) {
@@ -23,6 +60,9 @@ pub async fn monitor_loop(tx: tokio::sync::mpsc::UnboundedSender<UiUpdate>) {
         last_rx += net.total_received();
         last_tx += net.total_transmitted();
     }
+
+    let mut proxy_enabled = is_system_proxy_enabled();
+    let mut proxy_check_count: u32 = 0;
 
     loop {
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -53,11 +93,19 @@ pub async fn monitor_loop(tx: tokio::sync::mpsc::UnboundedSender<UiUpdate>) {
         last_rx = cur_rx;
         last_tx = cur_tx;
 
+        // Check proxy every 30s (15 iterations)
+        proxy_check_count += 1;
+        if proxy_check_count >= 15 {
+            proxy_check_count = 0;
+            proxy_enabled = is_system_proxy_enabled();
+        }
+
         if tx.send(UiUpdate::Monitor(MonitorSample {
             cpu_usage: cpu,
             mem_usage: mem_pct,
             net_upload_bps: upload_bps,
             net_download_bps: download_bps,
+            proxy_enabled,
         })).is_err() {
             break;
         }

@@ -30,7 +30,9 @@ network/
 - **归属地缓存**：轮询循环中维护 `last_geo`，IP 未变时复用缓存
 - **日志系统**：通过 `enable_log` 配置开关，UTF-8 BOM，超过 5MB 自动清空
 - **UiUpdate 统一通道**：IP 更新和系统监控共用一个 `mpsc` 通道，UI 侧统一分发
-- **DWM 圆角**：使用 `DWMWCP_ROUND` + 匹配背景画笔 + ClearType 字体，减少边缘锯齿
+- **窗口自适应宽度**：根据内容动态测量文本宽度，自动调整窗口大小并水平居中，每行内容独立居中
+- **注册表代理检测**：通过 `RegGetValueW` FFI 读取 Windows 系统代理设置，每 30 秒刷新，非配置文件驱动
+- **DWM 圆角**：使用 `DWMWCP_ROUND` + 匹配背景画刷 + ClearType 字体，减少边缘锯齿
 - **COLORREF 颜色**：注意 BGR 顺序（0x00BBGGRR），状态灯颜色采用 Material Design 色板
 
 ## 常用命令

@@ -79,9 +79,7 @@ fn main() {
 
     let client = client_builder.build().expect("Failed to build HTTP client");
 
-    let has_proxy = config.proxy.is_some();
     let state: SharedState = Arc::new(Mutex::new(OverlayState {
-        has_proxy,
         opacity: config.opacity,
         ..Default::default()
     }));

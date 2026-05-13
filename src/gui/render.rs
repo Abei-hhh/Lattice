@@ -16,6 +16,7 @@ const SEPARATOR_COLOR: COLORREF = COLORREF(0x00_55_55_55);
 
 const LWA_ALPHA_RAW: u32 = 0x02;
 pub const ROW_HEIGHT: i32 = 26;
+pub const WIN_HEIGHT: i32 = ROW_HEIGHT * 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CheckStatus {
@@ -38,7 +39,7 @@ pub struct OverlayState {
     pub visible: bool,
     pub show_isp: bool,
     pub opacity: f32,
-    pub has_proxy: bool,
+    pub proxy_enabled: bool,
     pub cpu_usage: f32,
     pub mem_usage: f32,
     pub net_up: u64,
@@ -56,7 +57,7 @@ impl Default for OverlayState {
             visible: true,
             show_isp: true,
             opacity: 0.92,
-            has_proxy: false,
+            proxy_enabled: false,
             cpu_usage: 0.0,
             mem_usage: 0.0,
             net_up: 0,
@@ -71,6 +72,96 @@ extern "system" {
     fn SetLayeredWindowAttributes(hwnd: HWND, crkey: COLORREF, balpha: u8, dwflags: u32) -> BOOL;
 }
 
+fn create_font() -> HFONT {
+    unsafe {
+        CreateFontW(
+            -12, 0, 0, 0,
+            FW_NORMAL.0 as i32,
+            0, 0, 0,
+            DEFAULT_CHARSET,
+            FONT_OUTPUT_PRECISION(0),
+            FONT_CLIP_PRECISION(0),
+            FONT_QUALITY(6), // CLEARTYPE_QUALITY
+            DEFAULT_PITCH.0 as u32,
+            windows::core::w!("Segoe UI"),
+        )
+    }
+}
+
+fn txt_width(hdc: HDC, text: &str) -> i32 {
+    let mut wbuf: Vec<u16> = text.encode_utf16().collect();
+    let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe {
+        let _ = DrawTextW(hdc, &mut wbuf, &mut rect, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    rect.right - rect.left
+}
+
+pub fn measure_required_width(hdc: HDC, state: &OverlayState) -> i32 {
+    let font = create_font();
+    let old = unsafe { SelectObject(hdc, font.into()) };
+
+    let w1 = measure_row1(hdc, state);
+    let w2 = measure_row2(hdc, state);
+
+    unsafe {
+        let _ = SelectObject(hdc, old);
+        let _ = DeleteObject(font.into());
+    }
+
+    w1.max(w2).max(280).min(600)
+}
+
+fn measure_row1(hdc: HDC, state: &OverlayState) -> i32 {
+    let update = &state.current_update;
+    let mut x: i32 = 30;
+
+    match &update.status {
+        CheckStatus::Checking => { x += txt_width(hdc, "检测中...") + 6; }
+        CheckStatus::NetworkError => { x += txt_width(hdc, "网络不可达") + 6; }
+        CheckStatus::ApiLimited => {
+            if let Some(ip) = update.ip.as_deref() {
+                x += txt_width(hdc, ip) + 6;
+                x += 12; // sep
+            }
+            x += txt_width(hdc, "查询受限") + 6;
+        }
+        CheckStatus::Success => {
+            x += txt_width(hdc, update.ip.as_deref().unwrap_or("--")) + 6;
+            x += 12; // sep
+            if let Some(geo) = &update.geo {
+                x += txt_width(hdc, &format_location(geo)) + 6;
+            } else {
+                x += txt_width(hdc, "--") + 6;
+            }
+        }
+    }
+
+    if !state.proxy_enabled {
+        x += 12; // gap
+        x += txt_width(hdc, "未设置代理") + 6;
+    }
+
+    x + 4 // right padding
+}
+
+fn measure_row2(hdc: HDC, state: &OverlayState) -> i32 {
+    let mut x: i32 = 18;
+
+    // Each draw_text adds +6 spacing, mirrors draw calls exactly
+    x += txt_width(hdc, "\u{2191}") + 6;
+    x += txt_width(hdc, &format_speed(state.net_up)) + 6;
+    x += 6; // gap before ↓
+    x += txt_width(hdc, "\u{2193}") + 6;
+    x += txt_width(hdc, &format_speed(state.net_down)) + 6;
+    x += 2 + 12; // gap + sep
+    x += txt_width(hdc, &format!("CPU {:.0}%", state.cpu_usage)) + 6;
+    x += 2 + 12; // gap + sep
+    x += txt_width(hdc, &format!("内存 {:.0}%", state.mem_usage)) + 6;
+
+    x + 4 // right padding
+}
+
 pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) {
     unsafe {
         let mut ps = PAINTSTRUCT::default();
@@ -83,18 +174,14 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
 
         let _ = SetBkMode(hdc, BACKGROUND_MODE(1));
 
-        let font = CreateFontW(
-            -12, 0, 0, 0,
-            FW_NORMAL.0 as i32,
-            0, 0, 0,
-            DEFAULT_CHARSET,
-            FONT_OUTPUT_PRECISION(0),
-            FONT_CLIP_PRECISION(0),
-            FONT_QUALITY(6), // CLEARTYPE_QUALITY
-            DEFAULT_PITCH.0 as u32,
-            windows::core::w!("Segoe UI"),
-        );
+        let font = create_font();
         let old_font = SelectObject(hdc, font.into());
+
+        // Measure each row for horizontal centering
+        let row1_w = measure_row1(hdc, state);
+        let row2_w = measure_row2(hdc, state);
+        let row1_offset = ((width - row1_w) / 2).max(0);
+        let row2_offset = ((width - row2_w) / 2).max(0);
 
         let update = &state.current_update;
         let max_x = width - 10;
@@ -106,9 +193,9 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
             CheckStatus::Checking => ACCENT_BLUE,
             CheckStatus::ApiLimited => ACCENT_ORANGE,
         };
-        draw_dot(hdc, 18, ROW_HEIGHT / 2, 4, dot_color);
+        draw_dot(hdc, 18 + row1_offset, ROW_HEIGHT / 2, 4, dot_color);
 
-        let mut x: i32 = 30;
+        let mut x: i32 = 30 + row1_offset;
 
         match &update.status {
             CheckStatus::Checking => {
@@ -138,7 +225,7 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
             }
         }
 
-        if !state.has_proxy {
+        if !state.proxy_enabled {
             draw_text(hdc, "未设置代理", x + 12, 0, ROW_HEIGHT, TEXT_DIM, max_x);
         }
 
@@ -152,7 +239,7 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
 
         // === Row 2: Net speed + CPU + Memory ===
         let y2 = ROW_HEIGHT;
-        let mut x2: i32 = 18;
+        let mut x2: i32 = 18 + row2_offset;
 
         x2 = draw_text(hdc, "\u{2191}", x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
         x2 = draw_text(hdc, &format_speed(state.net_up), x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
