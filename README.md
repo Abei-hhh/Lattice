@@ -52,10 +52,10 @@ cargo build --release
 
 ## 配置文件
 
-路径：`%APPDATA%\Vpn_Monitor\config.toml`（不存在则使用默认值）
+路径：与 `vpn-monitor.exe` 同目录的 `config.toml`（不存在则使用默认值）
 
 ```toml
-check_interval = 10         # IP 检测间隔（秒）
+check_interval = 10         # IP 检测间隔（秒），延迟也随此周期测量
 auto_start = true           # 开机自启（预留）
 click_through = false       # 鼠标穿透
 opacity = 0.85              # 窗口透明度 (0.0 ~ 1.0)
@@ -70,6 +70,10 @@ timeout = 5                 # 请求超时（秒）
 max_retries = 3             # 最大重试次数
 enable_log = false          # 是否启用日志记录
 # proxy = "socks5://127.0.0.1:1080"  # 可选代理
+
+monitor_interval = 2        # 系统监控刷新间隔（秒）：CPU/内存/网速
+proxy_check_interval = 30   # 代理检测间隔（秒）：注册表+PAC+端口+进程
+model_refresh_interval = 0  # Claude 模型标签刷新间隔（秒），0=仅启动时读取一次
 ```
 
 ### 日志

@@ -31,6 +31,9 @@ network/
 - **日志系统**：通过 `enable_log` 配置开关，UTF-8 BOM，超过 5MB 自动清空
 - **UiUpdate 统一通道**：IP 更新和系统监控共用一个 `mpsc` 通道，UI 侧统一分发
 - **窗口自适应宽度**：根据内容动态测量文本宽度，自动调整窗口大小并水平居中，每行内容独立居中
+- **延迟显示**：IP 检测时测量请求耗时，第一行显示延迟（<200ms 青色，>=200ms 橙色）
+- **Claude 模型标签**：启动时读取 `~/.claude/settings.json` 中的 `ANTHROPIC_MODEL`，显示在第一行最左侧
+- **精简归属地**：第一行只显示城市名，不再显示"国家 · 城市"格式
 - **注册表代理检测**：通过 `RegGetValueW` FFI 读取 Windows 系统代理设置，每 30 秒刷新，非配置文件驱动
 - **DWM 圆角**：使用 `DWMWCP_ROUND` + 匹配背景画刷 + ClearType 字体，减少边缘锯齿
 - **COLORREF 颜色**：注意 BGR 顺序（0x00BBGGRR），状态灯颜色采用 Material Design 色板
@@ -59,4 +62,4 @@ cargo build --release      # 发布编译（~2MB 单文件 exe）
 
 ## 配置
 
-路径：`%APPDATA%\Vpn_Monitor\config.toml`，详见 README.md。
+路径：与 `vpn-monitor.exe` 同目录的 `config.toml`，详见 README.md。

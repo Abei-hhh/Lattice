@@ -8,6 +8,7 @@ pub const BG_COLOR: COLORREF = COLORREF(0x00_2D_2D_2D);
 const TEXT_PRIMARY: COLORREF = COLORREF(0x00_FF_FF_FF);
 const TEXT_SECONDARY: COLORREF = COLORREF(0x00_B3_B3_B0);
 const TEXT_DIM: COLORREF = COLORREF(0x00_88_88_88);
+const TEXT_LATENCY: COLORREF = COLORREF(0x00_8A_BE_CE);
 const ACCENT_GREEN: COLORREF = COLORREF(0x00_50_AF_4C);
 const ACCENT_RED: COLORREF = COLORREF(0x00_36_43_F4);
 const ACCENT_BLUE: COLORREF = COLORREF(0x00_F3_96_21);
@@ -31,6 +32,7 @@ pub struct IpUpdate {
     pub ip: Option<String>,
     pub geo: Option<GeoInfo>,
     pub status: CheckStatus,
+    pub latency_ms: Option<u64>,
 }
 
 #[allow(dead_code)]
@@ -44,6 +46,7 @@ pub struct OverlayState {
     pub mem_usage: f32,
     pub net_up: u64,
     pub net_down: u64,
+    pub claude_model: String,
 }
 
 impl Default for OverlayState {
@@ -53,6 +56,7 @@ impl Default for OverlayState {
                 ip: None,
                 geo: None,
                 status: CheckStatus::Checking,
+                latency_ms: None,
             },
             visible: true,
             show_isp: true,
@@ -62,6 +66,7 @@ impl Default for OverlayState {
             mem_usage: 0.0,
             net_up: 0,
             net_down: 0,
+            claude_model: String::new(),
         }
     }
 }
@@ -116,6 +121,12 @@ fn measure_row1(hdc: HDC, state: &OverlayState) -> i32 {
     let update = &state.current_update;
     let mut x: i32 = 30;
 
+    // Claude model tag
+    if !state.claude_model.is_empty() {
+        x += txt_width(hdc, &state.claude_model) + 6;
+        x += 12; // sep
+    }
+
     match &update.status {
         CheckStatus::Checking => { x += txt_width(hdc, "检测中...") + 6; }
         CheckStatus::NetworkError => { x += txt_width(hdc, "网络不可达") + 6; }
@@ -135,6 +146,12 @@ fn measure_row1(hdc: HDC, state: &OverlayState) -> i32 {
                 x += txt_width(hdc, "--") + 6;
             }
         }
+    }
+
+    // Latency display
+    if let Some(ms) = update.latency_ms {
+        x += 12; // sep
+        x += txt_width(hdc, &format!("{}ms", ms)) + 6;
     }
 
     if !state.proxy_enabled {
@@ -197,6 +214,12 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
 
         let mut x: i32 = 30 + row1_offset;
 
+        // Claude model tag
+        if !state.claude_model.is_empty() {
+            x = draw_text(hdc, &state.claude_model, x, 0, ROW_HEIGHT, TEXT_DIM, max_x);
+            x = draw_sep(hdc, x, 0, ROW_HEIGHT);
+        }
+
         match &update.status {
             CheckStatus::Checking => {
                 x = draw_text(hdc, "检测中...", x, 0, ROW_HEIGHT, ACCENT_BLUE, max_x);
@@ -222,6 +245,21 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
                 } else {
                     x = draw_text(hdc, "--", x, 0, ROW_HEIGHT, TEXT_SECONDARY, max_x);
                 }
+
+                // Latency display
+                if let Some(ms) = update.latency_ms {
+                    x = draw_sep(hdc, x, 0, ROW_HEIGHT);
+                    let color = if ms < 200 { TEXT_LATENCY } else { ACCENT_ORANGE };
+                    x = draw_text(hdc, &format!("{}ms", ms), x, 0, ROW_HEIGHT, color, max_x);
+                }
+            }
+        }
+
+        // Latency for non-success states (if we have it)
+        if !matches!(update.status, CheckStatus::Success) {
+            if let Some(ms) = update.latency_ms {
+                x = draw_sep(hdc, x, 0, ROW_HEIGHT);
+                x = draw_text(hdc, &format!("{}ms", ms), x, 0, ROW_HEIGHT, TEXT_LATENCY, max_x);
             }
         }
 
@@ -260,14 +298,13 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
 }
 
 fn format_location(geo: &GeoInfo) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    if !geo.country.is_empty() {
-        parts.push(&geo.country);
-    }
     if !geo.city.is_empty() {
-        parts.push(&geo.city);
+        geo.city.clone()
+    } else if !geo.country.is_empty() {
+        geo.country.clone()
+    } else {
+        "--".to_string()
     }
-    if parts.is_empty() { "--".to_string() } else { parts.join(" · ") }
 }
 
 fn format_speed(bps: u64) -> String {

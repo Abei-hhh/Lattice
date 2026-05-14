@@ -9,13 +9,13 @@ const IP_SOURCES: &[&str] = &[
 ];
 
 pub enum IpFetchOutcome {
-    Ok { ip: String, source: &'static str },
+    Ok { ip: String, latency_ms: u64, #[allow(dead_code)] source: &'static str },
     RateLimited,
     Failed,
 }
 
 enum SourceResult {
-    Ok(String),
+    Ok(String, u64),
     RateLimited,
     Failed,
 }
@@ -27,6 +27,7 @@ pub async fn fetch_public_ip(client: &Client, timeout: Duration) -> IpFetchOutco
         tasks.push((
             url,
             tokio::spawn(async move {
+                let start = std::time::Instant::now();
                 let result = time::timeout(timeout, async {
                     let resp = client
                         .get(url)
@@ -43,8 +44,9 @@ pub async fn fetch_public_ip(client: &Client, timeout: Duration) -> IpFetchOutco
                     Ok(Ok((429, _))) => SourceResult::RateLimited,
                     Ok(Ok((status, text))) if (200..300).contains(&status) => {
                         let ip = text.trim().to_string();
+                        let latency_ms = start.elapsed().as_millis() as u64;
                         if ip.contains('.') || ip.contains(':') {
-                            SourceResult::Ok(ip)
+                            SourceResult::Ok(ip, latency_ms)
                         } else {
                             SourceResult::Failed
                         }
@@ -58,9 +60,9 @@ pub async fn fetch_public_ip(client: &Client, timeout: Duration) -> IpFetchOutco
     let mut saw_rate_limit = false;
     for (url, task) in tasks {
         match task.await {
-            Ok(SourceResult::Ok(ip)) => {
-                tracing::info!("Public IP {} fetched from {}", ip, url);
-                return IpFetchOutcome::Ok { ip, source: url };
+            Ok(SourceResult::Ok(ip, latency_ms)) => {
+                tracing::info!("Public IP {} fetched from {} in {}ms", ip, url, latency_ms);
+                return IpFetchOutcome::Ok { ip, source: url, latency_ms };
             }
             Ok(SourceResult::RateLimited) => {
                 tracing::warn!("IP source {} returned 429", url);

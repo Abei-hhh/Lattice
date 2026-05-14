@@ -111,6 +111,7 @@ pub fn create_and_run(
                 ip: None,
                 geo: None,
                 status: render::CheckStatus::Checking,
+                latency_ms: None,
             };
         }
 

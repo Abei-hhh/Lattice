@@ -17,6 +17,27 @@ use gui::window::UiUpdate;
 use network::geo_lookup::{self, GeoLookupOutcome};
 use network::ip_fetcher::{self, IpFetchOutcome};
 
+fn read_claude_model() -> String {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let settings_path = home.join(".claude").join("settings.json");
+
+    let content = match std::fs::read_to_string(&settings_path) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    let val: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+
+    val.get("env")
+        .and_then(|e| e.get("ANTHROPIC_MODEL"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 #[derive(Parser)]
 #[command(name = "vpn-monitor")]
 #[command(about = "Windows IP status overlay - shows public IP and geolocation")]
@@ -27,6 +48,16 @@ struct Args {
 }
 
 fn main() {
+    // Single instance check via named mutex
+    let _mutex = unsafe {
+        windows::Win32::System::Threading::CreateMutexW(
+            None, true, windows::core::w!("Vpn_Monitor_SingleInstance"),
+        )
+    };
+    if _mutex.is_ok() && unsafe { windows::Win32::Foundation::GetLastError().0 == 183 } {
+        return; // ERROR_ALREADY_EXISTS — another instance is running
+    }
+
     let args = Args::parse();
     let config_path = args.config.map(std::path::PathBuf::from);
     let config = config::load_config(config_path);
@@ -79,8 +110,11 @@ fn main() {
 
     let client = client_builder.build().expect("Failed to build HTTP client");
 
+    let claude_model = read_claude_model();
+
     let state: SharedState = Arc::new(Mutex::new(OverlayState {
         opacity: config.opacity,
+        claude_model,
         ..Default::default()
     }));
 
@@ -99,6 +133,8 @@ fn main() {
         let mut consecutive_failures: u32 = 0;
         let mut current_interval = check_interval;
         let mut poll_count: u32 = 0;
+        // Track whether we need to retry geo lookup for the current IP
+        let mut geo_needs_retry = false;
 
         loop {
             poll_count += 1;
@@ -108,65 +144,59 @@ fn main() {
             let outcome = ip_fetcher::fetch_public_ip(&poll_client, timeout).await;
 
             match outcome {
-                IpFetchOutcome::Ok { ip, .. } => {
+                IpFetchOutcome::Ok { ip, latency_ms, .. } => {
                     consecutive_failures = 0;
                     current_interval = check_interval;
 
                     let ip_changed = last_ip.as_ref() != Some(&ip);
                     tracing::info!(
-                        "[poll#{}] IP获取成功: ip={}, last_ip={}, ip_changed={}",
+                        "[poll#{}] IP获取成功: ip={}, last_ip={}, ip_changed={}, latency={}ms",
                         poll_count, ip,
-                        last_ip.as_deref().unwrap_or("None"), ip_changed
+                        last_ip.as_deref().unwrap_or("None"), ip_changed, latency_ms
                     );
 
-                    let (geo, geo_rate_limited) = if ip_changed {
-                        let timeout = Duration::from_secs(5);
-                        tracing::info!("[poll#{}] IP已变更，开始查询归属地...", poll_count);
-                        match geo_lookup::lookup_geo(&poll_client, &ip, timeout).await {
+                    if ip_changed {
+                        last_ip = Some(ip.clone());
+                        geo_needs_retry = true;
+                    }
+
+                    // Send IP update immediately so UI shows the IP quickly
+                    let _ = ip_tx.send(UiUpdate::Ip(IpUpdate {
+                        ip: Some(ip.clone()),
+                        geo: last_geo.clone(),
+                        status: CheckStatus::Success,
+                        latency_ms: Some(latency_ms),
+                    }));
+
+                    // Geo lookup: do it when IP changed or previous lookup failed
+                    if geo_needs_retry {
+                        let geo_timeout = Duration::from_secs(5);
+                        tracing::info!("[poll#{}] 查询归属地...", poll_count);
+                        match geo_lookup::lookup_geo(&poll_client, &ip, geo_timeout).await {
                             GeoLookupOutcome::Ok(g) => {
                                 tracing::info!(
                                     "[poll#{}] 归属地查询成功: {} {} (ISP: {})",
                                     poll_count, g.country, g.city, g.isp
                                 );
                                 last_geo = Some(g.clone());
-                                (Some(g), false)
+                                geo_needs_retry = false;
+
+                                // Send geo update
+                                let _ = ip_tx.send(UiUpdate::Ip(IpUpdate {
+                                    ip: Some(ip.clone()),
+                                    geo: Some(g),
+                                    status: CheckStatus::Success,
+                                    latency_ms: Some(latency_ms),
+                                }));
                             }
                             GeoLookupOutcome::RateLimited => {
-                                tracing::warn!("[poll#{}] 归属地查询被限流，使用缓存", poll_count);
-                                (last_geo.clone(), true)
+                                tracing::warn!("[poll#{}] 归属地查询被限流", poll_count);
                             }
                             GeoLookupOutcome::Failed => {
-                                tracing::warn!("[poll#{}] 归属地查询失败，使用缓存", poll_count);
-                                (last_geo.clone(), false)
+                                tracing::warn!("[poll#{}] 归属地查询失败，下次重试", poll_count);
                             }
                         }
-                    } else {
-                        tracing::info!("[poll#{}] IP未变更，使用缓存归属地", poll_count);
-                        (last_geo.clone(), false)
-                    };
-
-                    let status = if geo_rate_limited {
-                        CheckStatus::ApiLimited
-                    } else {
-                        CheckStatus::Success
-                    };
-
-                    let update = IpUpdate {
-                        ip: Some(ip.clone()),
-                        geo,
-                        status,
-                    };
-
-                    tracing::info!(
-                        "[poll#{}] 发送UI更新: ip={:?}, geo={:?}, status={:?}",
-                        poll_count, update.ip, update.geo, update.status
-                    );
-
-                    if ip_changed {
-                        last_ip = Some(ip);
                     }
-
-                    let _ = ip_tx.send(UiUpdate::Ip(update));
                 }
                 IpFetchOutcome::RateLimited => {
                     tracing::warn!("[poll#{}] IP源被限流", poll_count);
@@ -174,6 +204,7 @@ fn main() {
                         ip: last_ip.clone(),
                         geo: last_geo.clone(),
                         status: CheckStatus::ApiLimited,
+                        latency_ms: None,
                     }));
                     current_interval = check_interval.max(60);
                 }
@@ -187,6 +218,7 @@ fn main() {
                             ip: None,
                             geo: None,
                             status: CheckStatus::NetworkError,
+                            latency_ms: None,
                         }));
                     }
                     current_interval = (current_interval * 2).min(300);
@@ -200,9 +232,28 @@ fn main() {
 
     // System monitor task
     let monitor_tx = update_tx.clone();
+    let monitor_interval = config.monitor_interval;
+    let proxy_check_interval = config.proxy_check_interval;
     rt.spawn(async move {
-        monitor::monitor_loop(monitor_tx).await;
+        monitor::monitor_loop(monitor_tx, monitor_interval, proxy_check_interval).await;
     });
+
+    // Claude model refresh task (0 = disabled, only read at startup)
+    let model_refresh_interval = config.model_refresh_interval;
+    if model_refresh_interval > 0 {
+        let model_state = state.clone();
+        rt.spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(model_refresh_interval)).await;
+                let model = read_claude_model();
+                if !model.is_empty() {
+                    if let Ok(mut s) = model_state.lock() {
+                        s.claude_model = model;
+                    }
+                }
+            }
+        });
+    }
 
     drop(update_tx); // All senders cloned into tasks, drop the original
 

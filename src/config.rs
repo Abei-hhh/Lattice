@@ -33,6 +33,16 @@ pub struct AppConfig {
 
     #[serde(default)]
     pub enable_log: bool,
+
+    /// System monitor refresh interval in seconds (CPU/memory/network speed)
+    #[serde(default = "default_monitor_interval")]
+    pub monitor_interval: u64,
+    /// Proxy detection interval in seconds (registry + PAC + port + process)
+    #[serde(default = "default_proxy_interval")]
+    pub proxy_check_interval: u64,
+    /// Claude model label refresh interval in seconds (0 = read once at startup only)
+    #[serde(default = "default_model_refresh_interval")]
+    pub model_refresh_interval: u64,
 }
 
 fn default_check_interval() -> u64 { 10 }
@@ -41,6 +51,9 @@ fn default_opacity() -> f32 { 0.85 }
 fn default_position() -> String { "top-center".to_string() }
 fn default_timeout() -> u64 { 5 }
 fn default_max_retries() -> u32 { 3 }
+fn default_monitor_interval() -> u64 { 2 }
+fn default_proxy_interval() -> u64 { 30 }
+fn default_model_refresh_interval() -> u64 { 0 }
 fn default_hotkey_toggle() -> String { "ctrl+alt+h".to_string() }
 fn default_hotkey_lookup() -> String { "ctrl+alt+i".to_string() }
 fn default_hotkey_quit() -> String { "ctrl+alt+shift+k".to_string() }
@@ -61,19 +74,50 @@ impl Default for AppConfig {
             max_retries: default_max_retries(),
             proxy: None,
             enable_log: false,
+            monitor_interval: default_monitor_interval(),
+            proxy_check_interval: default_proxy_interval(),
+            model_refresh_interval: default_model_refresh_interval(),
         }
     }
 }
 
 pub fn config_path() -> PathBuf {
-    let app_data = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    app_data.join("Vpn_Monitor").join("config.toml")
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    exe_dir.join("config.toml")
 }
+
+const DEFAULT_CONFIG: &str = r#"# Vpn_Monitor 配置文件
+# 修改后重启程序生效
+
+check_interval = 10         # IP 检测间隔（秒），延迟也随此周期测量
+auto_start = true           # 开机自启（预留）
+click_through = false       # 鼠标穿透
+opacity = 0.85              # 窗口透明度 (0.0 ~ 1.0)
+position = "top-center"     # 窗口位置（预留）
+show_isp = true             # 是否显示 ISP（查询窗口生效）
+
+hotkey_toggle = "ctrl+alt+h"         # 切换显隐
+hotkey_lookup = "ctrl+alt+i"         # 打开查询窗口
+hotkey_quit = "ctrl+alt+shift+k"     # 退出程序
+
+timeout = 5                 # 请求超时（秒）
+max_retries = 3             # 最大重试次数
+enable_log = false          # 是否启用日志记录
+# proxy = "socks5://127.0.0.1:1080"  # 可选代理
+
+monitor_interval = 2        # 系统监控刷新间隔（秒）：CPU/内存/网速
+proxy_check_interval = 30   # 代理检测间隔（秒）：注册表+PAC+端口+进程
+model_refresh_interval = 0  # Claude 模型标签刷新间隔（秒），0=仅启动时读取一次
+"#;
 
 pub fn load_config(path: Option<PathBuf>) -> AppConfig {
     let path = path.unwrap_or_else(config_path);
     if !path.exists() {
-        tracing::info!("Config file not found at {:?}, using defaults", path);
+        let _ = fs::write(&path, DEFAULT_CONFIG);
+        tracing::info!("Generated default config at {:?}", path);
         return AppConfig::default();
     }
     match fs::read_to_string(&path) {
