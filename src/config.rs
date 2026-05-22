@@ -53,7 +53,7 @@ fn default_timeout() -> u64 { 5 }
 fn default_max_retries() -> u32 { 3 }
 fn default_monitor_interval() -> u64 { 2 }
 fn default_proxy_interval() -> u64 { 30 }
-fn default_model_refresh_interval() -> u64 { 0 }
+fn default_model_refresh_interval() -> u64 { 5 }
 fn default_hotkey_toggle() -> String { "ctrl+alt+h".to_string() }
 fn default_hotkey_lookup() -> String { "ctrl+alt+i".to_string() }
 fn default_hotkey_quit() -> String { "ctrl+alt+shift+k".to_string() }
@@ -110,7 +110,7 @@ enable_log = false          # 是否启用日志记录
 
 monitor_interval = 2        # 系统监控刷新间隔（秒）：CPU/内存/网速
 proxy_check_interval = 30   # 代理检测间隔（秒）：注册表+PAC+端口+进程
-model_refresh_interval = 0  # Claude 模型标签刷新间隔（秒），0=仅启动时读取一次
+model_refresh_interval = 5  # Claude 模型标签刷新间隔（秒），0=仅启动时读取一次
 "#;
 
 pub fn load_config(path: Option<PathBuf>) -> AppConfig {

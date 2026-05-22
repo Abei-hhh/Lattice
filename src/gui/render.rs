@@ -33,6 +33,11 @@ pub struct IpUpdate {
     pub geo: Option<GeoInfo>,
     pub status: CheckStatus,
     pub latency_ms: Option<u64>,
+    /// Short reason string shown when status == NetworkError, e.g. "超时" / "DNS 失败".
+    pub error_reason: Option<String>,
+    /// Short reason string shown when status == Success but geo lookup failed,
+    /// e.g. "超时" / "私有段" / "限流".
+    pub geo_error_reason: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -57,6 +62,8 @@ impl Default for OverlayState {
                 geo: None,
                 status: CheckStatus::Checking,
                 latency_ms: None,
+                error_reason: None,
+                geo_error_reason: None,
             },
             visible: true,
             show_isp: true,
@@ -128,8 +135,23 @@ fn measure_row1(hdc: HDC, state: &OverlayState) -> i32 {
     }
 
     match &update.status {
-        CheckStatus::Checking => { x += txt_width(hdc, "检测中...") + 6; }
-        CheckStatus::NetworkError => { x += txt_width(hdc, "网络不可达") + 6; }
+        CheckStatus::Checking => {
+            x += txt_width(hdc, "检测中...") + 6;
+        }
+        CheckStatus::NetworkError => {
+            // Show last-known IP/geo (dim) before the error so the user still
+            // has context about which network they were on.
+            if let Some(ip) = update.ip.as_deref() {
+                x += txt_width(hdc, ip) + 6;
+                x += 12; // sep
+                if let Some(geo) = &update.geo {
+                    x += txt_width(hdc, &format_location(geo)) + 6;
+                    x += 12; // sep
+                }
+            }
+            let err = format_network_error(update.error_reason.as_deref());
+            x += txt_width(hdc, &err) + 6;
+        }
         CheckStatus::ApiLimited => {
             if let Some(ip) = update.ip.as_deref() {
                 x += txt_width(hdc, ip) + 6;
@@ -143,7 +165,8 @@ fn measure_row1(hdc: HDC, state: &OverlayState) -> i32 {
             if let Some(geo) = &update.geo {
                 x += txt_width(hdc, &format_location(geo)) + 6;
             } else {
-                x += txt_width(hdc, "--") + 6;
+                let placeholder = format_geo_missing(update.geo_error_reason.as_deref());
+                x += txt_width(hdc, &placeholder) + 6;
             }
         }
     }
@@ -225,7 +248,27 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
                 x = draw_text(hdc, "检测中...", x, 0, ROW_HEIGHT, ACCENT_BLUE, max_x);
             }
             CheckStatus::NetworkError => {
-                x = draw_text(hdc, "网络不可达", x, 0, ROW_HEIGHT, ACCENT_RED, max_x);
+                // Keep last-known IP/geo on screen (dim) so the user can see
+                // what they were on before the failure — only the error label
+                // turns red. Matches measure_row1 layout exactly.
+                if let Some(ip) = update.ip.as_deref() {
+                    x = draw_text(hdc, ip, x, 0, ROW_HEIGHT, TEXT_DIM, max_x);
+                    x = draw_sep(hdc, x, 0, ROW_HEIGHT);
+                    if let Some(geo) = &update.geo {
+                        x = draw_text(
+                            hdc,
+                            &format_location(geo),
+                            x,
+                            0,
+                            ROW_HEIGHT,
+                            TEXT_DIM,
+                            max_x,
+                        );
+                        x = draw_sep(hdc, x, 0, ROW_HEIGHT);
+                    }
+                }
+                let err = format_network_error(update.error_reason.as_deref());
+                x = draw_text(hdc, &err, x, 0, ROW_HEIGHT, ACCENT_RED, max_x);
             }
             CheckStatus::ApiLimited => {
                 if let Some(ip) = update.ip.as_deref() {
@@ -243,7 +286,12 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
                     let loc = format_location(geo);
                     x = draw_text(hdc, &loc, x, 0, ROW_HEIGHT, TEXT_SECONDARY, max_x);
                 } else {
-                    x = draw_text(hdc, "--", x, 0, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+                    // Geo lookup failed but IP fetch succeeded — surface the
+                    // reason in dim color so the user knows it's the geo
+                    // provider that failed, not the network as a whole.
+                    let placeholder =
+                        format_geo_missing(update.geo_error_reason.as_deref());
+                    x = draw_text(hdc, &placeholder, x, 0, ROW_HEIGHT, TEXT_DIM, max_x);
                 }
 
                 // Latency display
@@ -294,6 +342,20 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
         let _ = SelectObject(hdc, old_font);
         let _ = DeleteObject(font.into());
         let _ = EndPaint(hwnd, &ps);
+    }
+}
+
+fn format_network_error(reason: Option<&str>) -> String {
+    match reason {
+        Some(r) if !r.is_empty() => format!("网络异常 ({})", r),
+        _ => "网络不可达".to_string(),
+    }
+}
+
+fn format_geo_missing(reason: Option<&str>) -> String {
+    match reason {
+        Some(r) if !r.is_empty() => format!("归属地? ({})", r),
+        _ => "--".to_string(),
     }
 }
 

@@ -32,7 +32,6 @@ const HKEY_CURRENT_USER: isize = 0x80000001;
 const RRF_RT_REG_DWORD: u32 = 0x10;
 const RRF_RT_REG_SZ: u32 = 0x02;
 
-/// Check ProxyEnable DWORD in registry
 fn reg_proxy_enable() -> bool {
     unsafe {
         let subkey = windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings");
@@ -49,11 +48,11 @@ fn reg_proxy_enable() -> bool {
             &mut dtype,
             &mut data as *mut u32 as *mut u8,
             &mut size,
-        ) == 0 && data != 0
+        ) == 0
+            && data != 0
     }
 }
 
-/// Check AutoConfigURL (PAC) in registry — non-empty means PAC proxy is active
 fn reg_pac_url() -> bool {
     unsafe {
         let subkey = windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings");
@@ -74,7 +73,6 @@ fn reg_pac_url() -> bool {
         if !ok || size <= 2 {
             return false;
         }
-        // Check the string is non-empty (size includes null terminator)
         let len = (size / 2) as usize;
         buf[..len.saturating_sub(1)].iter().any(|&c| c != 0)
     }
@@ -82,33 +80,30 @@ fn reg_pac_url() -> bool {
 
 // ── Port scan ─────────────────────────────────────────────────────
 
-/// Common proxy ports used by Clash, V2Ray, Shadowsocks, etc.
+/// Proxy-specific ports. We deliberately **omit** ports that commonly collide
+/// with non-proxy software (8080 dev HTTP, 9090 Prometheus/Clash API,
+/// 2080 generic, 8118 Privoxy, 10800 misc) — port scan alone is too noisy.
+/// Detection now relies on the registry first, then process names, with
+/// proxy-specific ports as a supplemental signal.
 const PROXY_PORTS: &[u16] = &[
     7890,  // Clash HTTP
     7891,  // Clash SOCKS
     7892,  // Clash mixed
     7893,  // Clash redir
-    1080,  // Generic SOCKS5
+    7897,  // Mihomo mixed default
     10808, // V2RayN HTTP
     10809, // V2RayN SOCKS
-    1081,  // Shadowsocks SOCKS
-    1087,  // Shadowsocks HTTP
-    8080,  // Generic HTTP proxy
-    8118,  // Privoxy
-    9090,  // Clash API / Generic
-    2080,  // Generic
     8388,  // Shadowsocks default
-    10800, // SOCKS variant
+    1080,  // Generic SOCKS5
+    1087,  // SS HTTP
 ];
 
-/// Check if any common proxy port is listening (non-blocking, short timeout)
 fn check_proxy_ports() -> bool {
     for &port in PROXY_PORTS {
-        if TcpStream::connect_timeout(
-            &format!("127.0.0.1:{}", port).parse().unwrap(),
-            Duration::from_millis(200),
-        ).is_ok() {
-            return true;
+        if let Ok(addr) = format!("127.0.0.1:{}", port).parse() {
+            if TcpStream::connect_timeout(&addr, Duration::from_millis(150)).is_ok() {
+                return true;
+            }
         }
     }
     false
@@ -116,13 +111,12 @@ fn check_proxy_ports() -> bool {
 
 // ── Process detection ─────────────────────────────────────────────
 
-/// Known proxy/VPN process names (lowercase, without extension)
 const PROXY_PROCESSES: &[&str] = &[
     "clash",
     "clash-win64",
     "clash-core",
     "clash-meta",
-    "mihomo",         // Clash Meta successor
+    "mihomo",
     "v2ray",
     "v2rayn",
     "v2rayng",
@@ -161,25 +155,33 @@ fn check_proxy_processes(sys: &System) -> bool {
 
 // ── Combined detection ────────────────────────────────────────────
 
-/// Multi-layer proxy detection:
-/// 1. Registry ProxyEnable (system proxy toggle)
-/// 2. Registry AutoConfigURL (PAC auto-config)
-/// 3. Common proxy port listening check
-/// 4. Known proxy process detection
+/// Tiered detection:
+/// 1. Registry ProxyEnable / PAC URL — definitive system-proxy signal.
+/// 2. Known proxy process running — reliable when system proxy is off but a
+///    tunnel client is active (e.g. TUN mode).
+/// 3. Proxy-specific port listening — supplemental.
 fn detect_proxy_active(sys: &System) -> bool {
-    reg_proxy_enable()
-        || reg_pac_url()
-        || check_proxy_ports()
-        || check_proxy_processes(sys)
+    if reg_proxy_enable() || reg_pac_url() {
+        return true;
+    }
+    if check_proxy_processes(sys) {
+        return true;
+    }
+    check_proxy_ports()
 }
 
-// ── Monitor loop ──────────────────────────────────────────────────
+// ── Synchronous monitor loop ──────────────────────────────────────
+//
+// Runs on a dedicated OS thread (not a tokio worker) because port scans and
+// `sysinfo::refresh_processes` are blocking syscalls that would otherwise
+// stall the tokio runtime servicing IP/geo lookups.
 
-pub async fn monitor_loop(
+pub fn monitor_loop_sync(
     tx: tokio::sync::mpsc::UnboundedSender<UiUpdate>,
     monitor_interval: u64,
     proxy_check_interval: u64,
 ) {
+    let monitor_interval = monitor_interval.max(1);
     let mut sys = System::new();
     let mut networks = Networks::new_with_refreshed_list();
 
@@ -192,8 +194,11 @@ pub async fn monitor_loop(
         last_tx += net.total_transmitted();
     }
 
+    // First proxy check needs an initial process snapshot.
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let mut proxy_enabled = detect_proxy_active(&sys);
-    let proxy_ticks = if monitor_interval > 0 && proxy_check_interval >= monitor_interval {
+
+    let proxy_ticks = if proxy_check_interval >= monitor_interval {
         (proxy_check_interval / monitor_interval).max(1) as u32
     } else {
         1
@@ -201,7 +206,7 @@ pub async fn monitor_loop(
     let mut proxy_check_count: u32 = 0;
 
     loop {
-        tokio::time::sleep(Duration::from_secs(monitor_interval.max(1))).await;
+        std::thread::sleep(Duration::from_secs(monitor_interval));
 
         sys.refresh_cpu_all();
         sys.refresh_memory();
@@ -224,8 +229,8 @@ pub async fn monitor_loop(
             cur_tx += net.total_transmitted();
         }
 
-        let download_bps = if monitor_interval > 0 { cur_rx.saturating_sub(last_rx) / monitor_interval } else { 0 };
-        let upload_bps = if monitor_interval > 0 { cur_tx.saturating_sub(last_tx) / monitor_interval } else { 0 };
+        let download_bps = cur_rx.saturating_sub(last_rx) / monitor_interval;
+        let upload_bps = cur_tx.saturating_sub(last_tx) / monitor_interval;
         last_rx = cur_rx;
         last_tx = cur_tx;
 
@@ -236,13 +241,17 @@ pub async fn monitor_loop(
             proxy_enabled = detect_proxy_active(&sys);
         }
 
-        if tx.send(UiUpdate::Monitor(MonitorSample {
-            cpu_usage: cpu,
-            mem_usage: mem_pct,
-            net_upload_bps: upload_bps,
-            net_download_bps: download_bps,
-            proxy_enabled,
-        })).is_err() {
+        if tx
+            .send(UiUpdate::Monitor(MonitorSample {
+                cpu_usage: cpu,
+                mem_usage: mem_pct,
+                net_upload_bps: upload_bps,
+                net_download_bps: download_bps,
+                proxy_enabled,
+            }))
+            .is_err()
+        {
+            // UI side dropped the receiver — shut down.
             break;
         }
     }
