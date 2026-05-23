@@ -1,0 +1,19 @@
+[package]
+name = "vpn-monitor-core"
+version = "0.1.0"
+edition = "2021"
+description = "平台无关核心：IP/Geo 抓取与缓存、cc-switch 多源读取、TOML 配置、运行时标志位"
+
+[dependencies]
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+dirs = { workspace = true }
+
+# cc-switch SQLite 读取（usage_daily_rollups + proxy_request_logs 聚合）。
+# bundled feature 把 sqlite3 源码静态编译进 .a，零系统依赖；增加约 ~700KB
+# 编译产物，可接受。
+rusqlite = { version = "0.32", features = ["bundled"] }

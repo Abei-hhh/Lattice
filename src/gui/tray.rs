@@ -37,6 +37,12 @@ pub const IDM_OPEN_CONFIG: u32 = 8011;
 pub const IDM_OPEN_LOG_DIR: u32 = 8012;
 pub const IDM_HISTORY: u32 = 8013;
 pub const IDM_ADVANCED: u32 = 8014;
+pub const IDM_USAGE_DETAIL: u32 = 8015;
+// 新增：浮窗形态切换 + 第二行模式切换
+pub const IDM_FORM_SIMPLE: u32 = 8020;
+pub const IDM_FORM_DETAILED: u32 = 8021;
+pub const IDM_ROW2_SYSTEM: u32 = 8022;
+pub const IDM_ROW2_USAGE: u32 = 8023;
 pub const IDM_QUIT: u32 = 8099;
 
 /// Register a notification icon associated with `hwnd`. The icon uses the
@@ -101,21 +107,69 @@ pub unsafe fn show_menu(hwnd: HWND, flags: &Arc<RuntimeFlags>) {
     let mask_ip = crate::network::ip_fetcher::get_mask_ip_logs();
     let mask_geo = crate::network::ip_fetcher::get_mask_geo_logs();
 
-    add_check(menu, IDM_TOGGLE_VISIBLE, "显示浮窗", visible);
-    add_check(menu, IDM_TOGGLE_LOCK, "锁定位置", locked);
-    add_check(menu, IDM_TOGGLE_CLICKTHROUGH, "鼠标穿透", click_thru);
+    // 读浮窗形态 + Row 2 模式（用于子菜单 radio）
+    let form = flags
+        .overlay_form
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|p| p.into_inner().clone());
+    let row2 = flags
+        .row2_mode
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_else(|p| p.into_inner().clone());
+
+    // ── 子菜单：显示设置（visible / lock / click-through） ──
+    let display_sub = CreatePopupMenu().ok();
+    if let Some(sub) = display_sub {
+        add_check(sub, IDM_TOGGLE_VISIBLE, "显示浮窗", visible);
+        add_check(sub, IDM_TOGGLE_LOCK, "锁定位置", locked);
+        add_check(sub, IDM_TOGGLE_CLICKTHROUGH, "鼠标穿透", click_thru);
+        attach_submenu(menu, sub, "显示设置 ▸");
+    }
+
+    // ── 子菜单：浮窗形态（simple / detailed） ──
+    let form_sub = CreatePopupMenu().ok();
+    if let Some(sub) = form_sub {
+        add_check(sub, IDM_FORM_SIMPLE, "简易", form == "simple");
+        add_check(sub, IDM_FORM_DETAILED, "完整 (含流量曲线)", form == "detailed");
+        attach_submenu(menu, sub, "浮窗形态 ▸");
+    }
+
+    // ── 子菜单：第二行模式（system / usage） ──
+    let row2_sub = CreatePopupMenu().ok();
+    if let Some(sub) = row2_sub {
+        add_check(sub, IDM_ROW2_SYSTEM, "系统资源 (↑↓/CPU/内存)", row2 == "system");
+        add_check(sub, IDM_ROW2_USAGE, "AI 用量 (主模型/5h/周)", row2 == "usage");
+        attach_submenu(menu, sub, "第二行模式 ▸");
+    }
+
+    // ── 子菜单：隐私 & 缓存 ──
+    let privacy_sub = CreatePopupMenu().ok();
+    if let Some(sub) = privacy_sub {
+        add_check(sub, IDM_TOGGLE_MASK_IP, "日志掩码 IP", mask_ip);
+        add_check(sub, IDM_TOGGLE_MASK_GEO, "日志掩码归属地", mask_geo);
+        add_check(sub, IDM_TOGGLE_GEO_CACHE, "启用归属地缓存", cache);
+        add_check(sub, IDM_TOGGLE_CROSS_CHECK, "HTTPS 跨源校验", cross);
+        attach_submenu(menu, sub, "隐私 & 缓存 ▸");
+    }
+
     add_sep(menu);
-    add_check(menu, IDM_TOGGLE_MASK_IP, "日志掩码 IP", mask_ip);
-    add_check(menu, IDM_TOGGLE_MASK_GEO, "日志掩码归属地", mask_geo);
-    add_check(menu, IDM_TOGGLE_GEO_CACHE, "启用归属地缓存", cache);
-    add_check(menu, IDM_TOGGLE_CROSS_CHECK, "HTTPS 跨源校验", cross);
-    add_sep(menu);
+    // 动作类（顶层直接可见，频繁用）
     add_item(menu, IDM_LOOKUP, "IP 查询...");
     add_item(menu, IDM_HISTORY, "历史时间线...");
+    add_item(menu, IDM_USAGE_DETAIL, "用量明细...");
     add_sep(menu);
     add_item(menu, IDM_ADVANCED, "高级设置...");
-    add_item(menu, IDM_OPEN_CONFIG, "打开 config.toml");
-    add_item(menu, IDM_OPEN_LOG_DIR, "打开日志目录");
+
+    // ── 子菜单：文件 ──
+    let files_sub = CreatePopupMenu().ok();
+    if let Some(sub) = files_sub {
+        add_item(sub, IDM_OPEN_CONFIG, "打开 config.toml");
+        add_item(sub, IDM_OPEN_LOG_DIR, "打开日志目录");
+        attach_submenu(menu, sub, "文件 ▸");
+    }
+
     add_sep(menu);
     add_item(menu, IDM_QUIT, "退出");
 
@@ -142,6 +196,14 @@ pub unsafe fn show_menu(hwnd: HWND, flags: &Arc<RuntimeFlags>) {
 unsafe fn add_item(menu: HMENU, id: u32, label: &str) {
     let w: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
     let _ = AppendMenuW(menu, MF_STRING, id as usize, PCWSTR(w.as_ptr()));
+}
+
+/// 把一个 popup HMENU 挂到父菜单上作为二级子菜单（MF_POPUP）。
+/// 注意：sub menu 的 HMENU 必须 cast 成 usize 作为 uIDNewItem 参数。
+/// 父菜单 DestroyMenu 时会递归销毁所有子菜单，无需手动释放。
+unsafe fn attach_submenu(parent: HMENU, sub: HMENU, label: &str) {
+    let w: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+    let _ = AppendMenuW(parent, MF_POPUP, sub.0 as usize, PCWSTR(w.as_ptr()));
 }
 
 unsafe fn add_check(menu: HMENU, id: u32, label: &str, checked: bool) {

@@ -31,6 +31,13 @@ pub struct RuntimeFlags {
     /// 浮窗左上 tag 显示哪个 cc-switch 工具的当前模型。
     /// 切换后下一次 model refresh task tick 即生效。
     pub active_cc_switch_provider: Arc<RwLock<String>>,
+
+    /// 浮窗形态："simple"（双行）或 "detailed"（双行 + 右侧流量曲线）。
+    /// 托盘菜单切换 → InvalidateRect 重绘即可生效，无需重建窗口。
+    pub overlay_form: Arc<RwLock<String>>,
+
+    /// 第二行内容模式："system"（↑↓+CPU+内存）或 "usage"（AI 用量）。
+    pub row2_mode: Arc<RwLock<String>>,
 }
 
 impl RuntimeFlags {
@@ -45,6 +52,8 @@ impl RuntimeFlags {
             active_cc_switch_provider: Arc::new(RwLock::new(
                 cfg.active_cc_switch_provider.clone(),
             )),
+            overlay_form: Arc::new(RwLock::new(cfg.overlay_form.clone())),
+            row2_mode: Arc::new(RwLock::new(cfg.row2_mode.clone())),
         })
     }
 

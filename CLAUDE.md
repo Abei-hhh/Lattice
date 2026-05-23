@@ -6,34 +6,59 @@ Windows 11 后台悬浮窗应用，Rust 编写。顶部显示当前公网 IP + �
 
 ## 架构
 
+**Workspace 结构**（Phase 0 已完成）：
+
 ```
-main.rs                 → 单实例守卫、按需日志、tokio runtime、IP 轮询 task、Claude/CC-Switch 标签刷新；监控独立 OS 线程；
-                          构造 GeoCache / RuntimeFlags / Notify 三件套并下发到各线程
-build.rs                → 编译期 SVG → 多尺寸 .ico → embed-resource 链接进 exe 资源段
-config.rs               → AppConfig + TOML 加载 + 快捷键解析（被设置对话框 toml_edit 路径并存）
-cc_switch.rs            → 通用 cc-switch 多源读取（claude / codex / gemini / opencode / hermes / openclaw）
-runtime.rs              → RuntimeFlags：可热切换的标志位组（AtomicBool + RwLock<String> 主题/源）
-monitor.rs              → CPU/内存/网速 + 并发端口扫描 + 多层代理检测 + 空闲降频；
-                          代理状态翻转时通过 Notify 通知 IP 轮询；catch_unwind 自动重启
-gui/
-  window.rs             → 悬浮窗主消息循环（MsgWaitForMultipleObjectsEx + mpsc 轮询）；
-                          Arc<WindowContext>；WM_NCHITTEST 拖动 + WM_EXITSIZEMOVE 位置持久化；
-                          WM_POWERBROADCAST 唤醒 + WM_APP_TRAY 路由 + 全菜单 WM_COMMAND
-  render.rs             → GDI 双行布局：Claude/IP/归属地/延迟/⚠跨源警告/代理 + 网速/CPU/内存（颜色全部走 theme）
-  theme.rs              → Light/Dark 色板 + 系统主题探测（HKCU AppsUseLightTheme）+ DwmSetWindowAttribute dark caption 助手
-  md3.rs                → MD3 风格 owner-draw 按钮（RoundRect + 主题色 + 焦点描边）
-  hotkey.rs             → RegisterHotKey / UnregisterHotKey（三个全局热键）
-  overlay_state.rs      → 浮窗位置 + 锁定状态持久化到 overlay_state.json（独立于 config.toml）
-  tray.rs               → Shell_NotifyIconW 托盘图标 + 两层右键菜单 + ShellExecuteW 辅助
-  lookup_dialog.rs      → IP 查询窗口；支持 initial_ip 预填（历史窗口"双击重查"用）；
-                          先查 GeoCache 命中再打 API
-  history_dialog.rs     → IP 历史时间线 ListView 窗口：搜索 / 双击重查 / 右键复制·删除 / CSV 导出
-  settings_dialog.rs    → 高级设置 5-Tab 对话框：全字段编辑，toml_edit 保留注释，分立即生效/重启生效
-network/
-  ip_fetcher.rs         → 多源并发抓 IP + 失败原因分类（FailReason 枚举）+ mask_ip/mask_geo/mask_proxy_url 脱敏
-  geo_lookup.rs         → 双 provider：cross_check 时 wait-both 优先 HTTPS 并回传不一致 warning；否则竞速
-  geo_cache.rs          → 磁盘 LRU 缓存：/24 网段归并、TTL、原子写盘、history()/remove() API
+Vpn_Monitor/
+├── Cargo.toml             ← [workspace] + binary [package]，公共依赖在 [workspace.dependencies]
+├── crates/
+│   └── core/              ← 平台无关核心（Linux/macOS 上 cargo build -p vpn-monitor-core 也能编）
+│       ├── Cargo.toml     ← vpn-monitor-core lib
+│       └── src/
+│           ├── lib.rs
+│           ├── config.rs       ← AppConfig + TOML 加载 + 快捷键解析
+│           ├── cc_switch.rs    ← claude / codex / gemini / opencode / hermes / openclaw 多源读取
+│           ├── runtime.rs      ← RuntimeFlags：AtomicBool + RwLock<String> 跨线程共享
+│           ├── usage.rs        ← cc-switch SQLite 5h/周用量聚合 + 明细查询（rusqlite bundled）
+│           ├── proxy_rpc.rs    ← Clash / Mihomo / sing-box clash-api 客户端（自动探测 9090/9001/6170）
+│           └── network/
+│               ├── mod.rs
+│               ├── ip_fetcher.rs   ← 多源并发抓 IP + mask_ip/mask_geo/mask_proxy_url 脱敏
+│               ├── geo_lookup.rs   ← 双 provider 跨源校验
+│               ├── geo_cache.rs    ← /24 网段 LRU 磁盘缓存
+│               └── leak_check.rs   ← DNS / IPv6 泄漏检测（v6 IP + Cloudflare /cdn-cgi/trace）
+├── src/                    ← Windows 桌面 binary（GUI 壳 + 平台特定监控）
+│   ├── main.rs                 ← 单实例守卫、tokio runtime、6 个后台 task；
+│   │                             `pub use vpn_monitor_core::{...}` 让 gui/ 子模块继续用
+│   │                             `crate::config::*` 等路径无需大改
+│   ├── monitor.rs              ← Win32 注册表代理检测、端口并发扫描、GetLastInputInfo 空闲探测
+│   ├── tcp_table.rs            ← GetExtendedTcpTable 拿活跃 TCP 远端 IP → GeoCache 反查国家分布
+│   └── gui/                    ← 全 Win32 UI（详见下文）
+├── assets/app.svg          ← 应用图标源文件
+└── build.rs                ← 编译期 SVG → 多尺寸 .ico → embed-resource 链接进 exe 资源段
 ```
+
+**src/gui/ 模块职责**：
+
+| 文件 | 职责 |
+|---|---|
+| `window.rs` | 悬浮窗主消息循环（MsgWaitForMultipleObjectsEx + mpsc 轮询）；Arc<WindowContext>；WM_NCHITTEST 拖动；WM_EXITSIZEMOVE 位置持久化；WM_POWERBROADCAST 唤醒；WM_APP_TRAY 路由；全菜单 WM_COMMAND |
+| `render.rs` | GDI 渲染；支持 simple/detailed 两种形态；row2 system/usage 双模式；detailed 模式右侧 sparkline + 国家分布堆叠条 |
+| `theme.rs` | Light/Dark 色板 + 系统主题探测（HKCU AppsUseLightTheme）+ DwmSetWindowAttribute dark caption 助手 |
+| `md3.rs` | MD3 风格 owner-draw 按钮（RoundRect + 主题色 + 焦点描边） |
+| `hotkey.rs` | RegisterHotKey / UnregisterHotKey（三个全局热键） |
+| `overlay_state.rs` | 浮窗位置 + 锁定状态持久化到 overlay_state.json（独立于 config.toml） |
+| `tray.rs` | Shell_NotifyIconW 托盘图标 + 两层右键菜单 + ShellExecuteW 辅助 |
+| `lookup_dialog.rs` | IP 查询窗口；支持 initial_ip 预填（历史窗口"双击重查"用）；先查 GeoCache 命中再打 API |
+| `history_dialog.rs` | IP 历史时间线 ListView 窗口：搜索 / 双击重查 / 右键复制·删除 / CSV 导出 |
+| `settings_dialog.rs` | 高级设置 5-Tab 对话框：全字段编辑，toml_edit 保留注释，分立即生效/重启生效 |
+| `usage_dialog.rs` | AI 用量明细窗口：4 时段 radio + ListView（工具/Provider/模型/请求数/Tok/费用/延迟） |
+
+**workspace 路径备忘**：
+
+- binary 子 crate（`src/`）内部仍可继续用 `crate::config::*` / `crate::network::*` 等老路径 ——
+  `main.rs` 顶部一行 `pub use vpn_monitor_core::{cc_switch, config, network, runtime};` 做了 alias。
+- 若新写代码，推荐直接 `use vpn_monitor_core::config::AppConfig;` 表达更清楚的跨 crate 依赖关系。
 
 ## 关键设计决策
 
@@ -139,12 +164,18 @@ network/
 - **持久化**：`overlay_state.json` 独立文件存 `{ x, y, locked }`，每次拖动结束（WM_EXITSIZEMOVE）和正常退出（WM_DESTROY）都写盘
 - **不写 config.toml**：拖动频繁，避免覆盖主配置丢注释
 
-### 托盘图标 + 两层右键菜单
-- Shell_NotifyIconW 注册占位 IDI_APPLICATION 图标（未来可换 .ico 资源）
+### 托盘图标 + 多层右键菜单
+- Shell_NotifyIconW 注册嵌入的应用图标（资源 ID 1）
 - 自定义 `WM_APP_TRAY = WM_APP+2`：lparam 低字为鼠标事件，左/右键 up 都召唤菜单
-- 菜单分两层（CreatePopupMenu + 分隔符）：
-  - **快速开关**（带对勾）：显示浮窗 / 锁定 / 鼠标穿透 / 掩码 IP / 掩码 Geo / 启用缓存 / 跨源校验
-  - **动作**：IP 查询 / 历史时间线 / 高级设置 / 打开 config / 打开日志目录 / 退出
+- 菜单结构：
+  - **二级子菜单**（CreatePopupMenu + AppendMenuW(MF_POPUP)）：
+    - `显示设置 ▸` —— 显示浮窗 / 锁定位置 / 鼠标穿透
+    - `浮窗形态 ▸` —— 简易 / 完整（含流量曲线）
+    - `第二行模式 ▸` —— 系统资源 / AI 用量
+    - `隐私 & 缓存 ▸` —— 日志掩码 IP / 日志掩码归属地 / 启用归属地缓存 / HTTPS 跨源校验
+    - `文件 ▸` —— 打开 config.toml / 打开日志目录
+  - **顶层动作**（频繁用，直达）：IP 查询 / 历史时间线 / 用量明细 / 高级设置 / 退出
+- 子菜单 HMENU 不需手动 DestroyMenu，DestroyMenu 父菜单会递归销毁
 - **立即生效**字段全部走 RuntimeFlags AtomicBool 或 ip_fetcher 静态 atomic，菜单点完下一次 tick 已生效
 
 ### 设置对话框（settings_dialog.rs）
@@ -194,6 +225,89 @@ network/
 - **右键菜单**（NM_RCLICK）：复制 IP / 复制完整行 / 从缓存删除（调 `GeoCache::remove`）
 - **CSV 导出**：GetSaveFileNameW + UTF-8 BOM（Excel 才认中文）+ RFC 4180 转义
 - 所有过滤 / 删除都操作内存里 `visible_entries`，原始 `all_entries` 留作刷新对照
+
+### 浮窗双形态（simple / detailed）
+- `overlay_form` 字段 + RuntimeFlags.overlay_form（Arc<RwLock<String>>）热切换
+- ROW_HEIGHT 调整为 28（原 26，加大呼吸感）；新增 ROW3_HEIGHT = 64
+- **simple**：双行布局，总高 56（2 × 28）
+- **detailed**：**3 行**布局，总高 120（2 × 28 + 64）
+  - **第三行（全宽）**：顶部 8px **国家分布堆叠条** + 紧邻的国家 legend（top-3 "● US 60%"）+ 主体全宽双折线 sparkline
+  - 国家分布：来自 `tcp_table::summarize_by_country` [(country, count)]，颜色按字符串 FNV-1a hash → HSV
+  - 流量曲线：60 个 (up_bps, down_bps) 采样点（每次 monitor tick push），双折线，up=fg_latency 青色 / down=accent_green，按窗口 max 自动归一化
+  - 右下角小字标当前最高速率
+- 托盘菜单 `IDM_FORM_SIMPLE` / `IDM_FORM_DETAILED` 切换 → RuntimeFlags + state 同步 + recalc_overlay_width（手动重测宽 + 重设高度 + SetWindowPos）
+
+### Row 2 双模式（system / usage）
+- `row2_mode` 字段 + RuntimeFlags.row2_mode 热切换
+- **system**：↑/↓ + CPU + 内存（沿用 monitor 数据）
+- **usage**：主用模型 + 5小时配额% + 倒计时 + 7天配额% + 倒计时
+  - 显示格式：`{model} · 5小时:26% 41m · 7天:56% 1d1h`
+  - **百分比基准 = 真实用户消息数 / 配置上限**（与 cc-switch UI 口径一致）
+  - 真实用户消息从 `~/.claude/projects/**/*.jsonl` 解析：行含 `"type":"user"` 且 **不含** `tool_use_id`（后者是 Claude 工具调用结果回传，1 次用户消息可触发 5–10 次这种回传）
+  - 之前用 `proxy_request_logs.request_count` 会把 1 条消息算 ~7 次（含工具循环），用 `total_cost_usd` 会因 API 列表价 ≫ 订阅价而严重偏高，都不对
+  - 文件列表通过 cc-switch 自己维护的 `session_log_sync` 表取，只读 `last_modified` 落在窗口内的（性能优化）
+  - 时间戳用手写 ISO8601 → unix 转换，不引 chrono 到 core
+  - 配置：`usage_5h_limit_requests`（默认 50，Anthropic Pro 真实配额；Max 用户改 250）/ `usage_week_limit_requests`（默认 1000，Max 改 5000）
+  - 倒计时 = 窗口内**最早用户消息** + 窗口长度 - now；格式：<60m → `Nm`、<24h → `NhMm`、≥24h → `NdMh`
+  - 百分比着色：<60% 次要色 / 60-85% 橙 / >85% 红
+  - 配额 = 0 时退化为只显示绝对消息数
+- 托盘菜单 `IDM_ROW2_SYSTEM` / `IDM_ROW2_USAGE` 切换
+
+### cc-switch SQLite 用量集成（core/usage.rs）
+- 读 `~/.cc-switch/cc-switch.db` 的 **proxy_request_logs** 表（cc-switch proxy 模式下记录每次请求）
+- `rusqlite = "0.32"` features = ["bundled"] —— 静态编译 sqlite3 源码，零系统依赖，增 ~700KB
+- 只读打开 (`SQLITE_OPEN_READ_ONLY`)，对 cc-switch 写入零影响（WAL 模式）
+- `read_usage_stats(app_type)` 返回 `UsageStats { window_5h, window_week }`，每个 `UsageWindow` 含 req_count / input_tokens / output_tokens / cache_read / total_cost_usd / top_model
+- `list_usage_breakdown(since_secs)` 给用量明细窗口用：按 (app_type, provider_id, model) GROUP BY，cost 降序
+- 后台 task 每 30s 刷新一次（`usage_refresh_interval`），写到 `OverlayState.usage`
+- 时区策略：window_week 用 "now − 7×24h 滚动"近似（避免引 chrono 到 core），用户感知一致
+
+### DNS / IPv6 泄漏检测（core/network/leak_check.rs）
+- 三路并发探测：
+  1. **v4 country**：复用主 IP 轮询拿到的国家
+  2. **v6 country**：调 `api6.ipify.org`（强制 v6 路径）拿 v6 IP → geo_lookup 查国家；机器无 v6 → None（不算泄漏）
+  3. **DNS country**：调 `https://1.1.1.1/cdn-cgi/trace`，解析 `loc=XX` 行（Cloudflare 看到的 DNS 解析者 ISO 国别）
+- 短超时（3s），任一失败安静降级为 None
+- `v4_country != v6_country`（两者非空）→ `v6_leak = true`
+- `v4_country != dns_country`（两者非空）→ `dns_leak = true`
+- UI 表现：浮窗第一行尾部红色 `[v6泄漏]` / `[DNS泄漏]` 徽章
+- 后台 task 每 2 分钟刷新（leak 不变频繁，节省 HTTPS 开销）
+
+### Clash / Mihomo / sing-box RPC 集成（core/proxy_rpc.rs）
+- 自动探测 `127.0.0.1:9090`（Clash/Mihomo 默认）→ 9001（fork）→ 6170（sing-box clash-api）
+- GET `/version` 鉴别工具（Mihomo 返回 `meta: true`、sing-box 返回 `version: "sing-box ..."`、Clash 默认）
+- GET `/proxies` 找 `type == "Selector"` 的组（优先名字含 select/proxy/代理/节点/GLOBAL），取 `now` 字段 = 当前选中节点名
+- 后台 task 每 5s 探测一次，写到 `OverlayState.proxy_rpc: Option<ProxyRpcSnapshot>`
+- UI 表现：浮窗第一行尾部用 `→ {节点名}` 绿色标签替代原 `未设置代理` 文本（节点名通常自带 emoji 国旗）
+
+### 流量分流可视化（src/tcp_table.rs）
+- Win32 `GetExtendedTcpTable(TCP_TABLE_BASIC_CONNECTIONS, AF_INET)` 拿所有 IPv4 TCP 连接
+- 只看 ESTABLISHED (state = 5) 的远端 IP，去重后按 GeoCache 命中聚合国家
+- 跳过私有/CGNAT/loopback（10.0.0.0/8、172.16/12、192.168/16、100.64/10、127.0.0.0/8）
+- 未命中 cache 的远端 IP 归到"未知"桶
+- top_n=5 之外的国家合并到"其它"桶
+- 独立 OS 线程每 10s 扫一次 → 写到 `OverlayState.traffic_by_country`
+- UI 只在 detailed 形态显示（堆叠条）
+
+### 用量明细窗口（usage_dialog.rs）
+- 顶部 4 个 radio：最近 5h / 24h / 7d / 30d，切换即重新 SQL GROUP BY 查询
+- ListView 列：工具 / Provider / 模型 / 请求数 / 输入 Tok（K/M 短形）/ 输出 Tok / 费用 USD / 平均延迟
+- 按 cost 降序，所有 provider × model 组合全部列出
+- 同 cc-switch SQLite 只读打开，对 cc-switch 写入零影响
+- 跟随主题 + MD3 owner-draw 按钮（关闭按钮）
+
+## 后台 task 一览（main.rs 启动后并发跑）
+
+| Task | 间隔 | 用途 |
+|---|---|---|
+| IP 轮询 | check_interval (10s) | 公网 IP + 归属地 |
+| 监控线程（OS 线程） | monitor_interval (2s) | CPU/内存/网速/代理检测 |
+| 代理变化通知 | 事件驱动 | 监控检测到 proxy 翻转 → notify_one() 唤醒 IP 轮询 |
+| 模型标签刷新 | model_refresh_interval (5s) | 读 cc-switch active provider 当前模型 |
+| **用量统计刷新** | usage_refresh_interval (30s) | 读 cc-switch SQLite 5h+周用量 |
+| **代理 RPC 探测** | 5s | Clash/sing-box 当前节点名 |
+| **泄漏检测** | 120s | DNS / v6 泄漏 |
+| **TCP 表扫描**（OS 线程） | 10s | 国家分布（detailed 模式专用） |
 
 ## 常用命令
 
@@ -257,6 +371,11 @@ cargo build --release      # 发布编译（~2.5MB 单文件 exe，含 toml_edit
 | `geo_cross_check` | true | 跨源（HTTPS/HTTP）国别校验 | ✅ |
 | `theme` | "system" | UI 主题：system / light / dark | ✅ |
 | `active_cc_switch_provider` | "claude" | 浮窗左上 tag 显示哪个 cc-switch 工具的模型 | ✅ |
+| `overlay_form` | "simple" | 浮窗形态：simple（双行）/ detailed（双行 + 流量曲线 + 国家分布） | ✅（托盘菜单） |
+| `row2_mode` | "system" | 第二行：system（↑↓+CPU+内存）/ usage（主模型+5h+周 用量） | ✅（托盘菜单） |
+| `usage_refresh_interval` | 30 | cc-switch SQLite 用量读取间隔（秒），0 关闭 | 重启 |
+| `usage_5h_limit_requests` | 50 | 5h 滚动窗口**用户消息数**上限（Anthropic Pro 真实配额；Max 改 250）；0 关闭百分比 | 重启 |
+| `usage_week_limit_requests` | 1000 | 7d 滚动窗口用户消息数上限（Max 改 5000） | 重启 |
 
 ### 状态文件
 
@@ -265,3 +384,6 @@ cargo build --release      # 发布编译（~2.5MB 单文件 exe，含 toml_edit
 | `%APPDATA%\Vpn_Monitor\geo_cache.json` | IP→Geo LRU 缓存（DiskFormat { entries, lru }） |
 | `%APPDATA%\Vpn_Monitor\overlay_state.json` | 浮窗位置 + 锁定状态（拖动时刷盘） |
 | `%APPDATA%\Vpn_Monitor\vpn-monitor.log` | 启用日志后写到这里（5MB 自动轮换） |
+| `~/.cc-switch/cc-switch.db` (**只读外部依赖**) | cc-switch 写入；本工具读 `proxy_request_logs` 表做用量统计 |
+| `~/.cc-switch/settings.json` (**只读外部依赖**) | cc-switch 写入；本工具读 `currentProvider*` 字段做多源检测 |
+| `~/.claude/settings.json` (**只读外部依赖**) | Claude Code / cc-switch 写入；本工具读 `env.ANTHROPIC_MODEL` 拿当前 Claude 模型 |

@@ -7,7 +7,13 @@
       "PowerShell($db = \"$env:USERPROFILE\\\\.cc-switch\\\\cc-switch.db\"; & sqlite3.exe $db \"SELECT id, name, app_type, is_current, substr\\(settings_config, 1, 400\\) FROM providers WHERE app_type='claude' AND is_current=1;\" 2>&1)",
       "mcp__mcpServers__read_text_file",
       "Bash(findstr /i \"currentProvider\")",
-      "Bash(tasklist)"
+      "Bash(tasklist)",
+      "Bash(awk 'BEGIN{blank=0} /^$/{blank++; next} {for\\(i=0;i<blank;i++\\)print \"\"; blank=0; print}')",
+      "Read(//tmp/**)",
+      "Bash(git push *)",
+      "Bash(FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter \"sed '/^Co-Authored-By:.*Claude/d' | awk 'BEGIN{e=0} /./{for\\(i=0;i<e;i++\\)print \\\\\"\\\\\"; e=0; print; next} {e++}'\" 83cf873~1..HEAD)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

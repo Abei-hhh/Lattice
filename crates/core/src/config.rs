@@ -86,6 +86,32 @@ pub struct AppConfig {
     /// 候选：claude / codex / gemini / opencode / openclaw / hermes。
     #[serde(default = "default_cc_switch_provider")]
     pub active_cc_switch_provider: String,
+
+    /// 浮窗形态："simple"（双行）或 "detailed"（双行 + 右侧流量曲线）。
+    #[serde(default = "default_overlay_form")]
+    pub overlay_form: String,
+
+    /// 第二行显示内容："system"（↑↓ + CPU + 内存）或 "usage"
+    /// （主用模型 + 5h/本周 token + cost）。
+    #[serde(default = "default_row2_mode")]
+    pub row2_mode: String,
+
+    /// AI 用量数据刷新间隔（秒）。读 cc-switch SQLite，~毫秒级，
+    /// 但 UI 也不需要秒级更新，默认 30s 足够。0 关闭。
+    #[serde(default = "default_usage_refresh_interval")]
+    pub usage_refresh_interval: u64,
+
+    /// 5 小时滚动窗口的**请求次数**上限，用于浮窗百分比基准。
+    /// cc-switch UI 也是按请求数算 % —— 之前用 USD 累计会因为
+    /// total_cost_usd 是 API 列表价（非订阅价）而严重偏高。
+    /// Anthropic Pro 默认 ~50 req/5h；Max ~250 req/5h；Team/Enterprise 更高。
+    /// 0 = 不显示百分比，只显示绝对请求数。
+    #[serde(default = "default_usage_5h_limit_requests")]
+    pub usage_5h_limit_requests: u64,
+
+    /// 7 天滚动窗口的请求次数上限。Pro ~1000 / Max ~5000，按需调整。
+    #[serde(default = "default_usage_week_limit_requests")]
+    pub usage_week_limit_requests: u64,
 }
 
 fn default_check_interval() -> u64 { 10 }
@@ -103,6 +129,13 @@ fn default_idle_threshold() -> u64 { 15 * 60 }
 fn default_idle_multiplier() -> u64 { 5 }
 fn default_theme() -> String { "system".to_string() }
 fn default_cc_switch_provider() -> String { "claude".to_string() }
+fn default_overlay_form() -> String { "simple".to_string() }
+fn default_row2_mode() -> String { "system".to_string() }
+fn default_usage_refresh_interval() -> u64 { 30 }
+// 默认按 Anthropic Pro：5h 50 条用户消息 / 7d 约 1000 条。
+// Max 用户改大一档：250 / 5000。
+fn default_usage_5h_limit_requests() -> u64 { 50 }
+fn default_usage_week_limit_requests() -> u64 { 1000 }
 fn default_hotkey_toggle() -> String { "ctrl+alt+h".to_string() }
 fn default_hotkey_lookup() -> String { "ctrl+alt+i".to_string() }
 fn default_hotkey_quit() -> String { "ctrl+alt+shift+k".to_string() }
@@ -136,6 +169,11 @@ impl Default for AppConfig {
             geo_cross_check: true,
             theme: default_theme(),
             active_cc_switch_provider: default_cc_switch_provider(),
+            overlay_form: default_overlay_form(),
+            row2_mode: default_row2_mode(),
+            usage_refresh_interval: default_usage_refresh_interval(),
+            usage_5h_limit_requests: default_usage_5h_limit_requests(),
+            usage_week_limit_requests: default_usage_week_limit_requests(),
         }
     }
 }
@@ -182,6 +220,12 @@ geo_cross_check = true            # 跨源比对国别，HTTPS 优先 ipwho.is
 
 theme = "system"                            # 主题：system / light / dark
 active_cc_switch_provider = "claude"        # 浮窗左上 tag 读哪个 cc-switch 工具
+
+overlay_form = "simple"                     # 浮窗形态：simple（双行）/ detailed（双行 + 流量曲线）
+row2_mode = "system"                        # 第二行：system（↑↓+CPU+内存）/ usage（AI 用量）
+usage_refresh_interval = 30                 # 读 cc-switch SQLite 用量的间隔（秒），0 关闭
+usage_5h_limit_requests = 50                # 5h 滚动窗口**用户消息数**上限（Anthropic Pro ≈ 50 / Max ≈ 250）
+usage_week_limit_requests = 1000            # 7d 滚动窗口用户消息数上限
 "#;
 
 pub fn load_config(path: Option<PathBuf>) -> AppConfig {

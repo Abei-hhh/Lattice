@@ -109,6 +109,29 @@ pub(crate) unsafe fn set_overlay_click_through(hwnd: HWND, enable: bool) {
     apply_click_through(hwnd, enable);
 }
 
+/// 立刻重新测量并应用宽度+高度。形态/模式切换走这个，避免等下次 channel 消息。
+/// 高度按当前 form 决定（simple=2 行，detailed=2 行+sparkline 行）。
+unsafe fn recalc_overlay_width(hwnd: HWND, ctx: &WindowContext) {
+    let (required, height) = {
+        let s = match ctx.state.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let hdc = GetDC(Some(hwnd));
+        let w = render::measure_required_width(hdc, &s);
+        ReleaseDC(Some(hwnd), hdc);
+        (w, render::window_height_for(&s.overlay_form))
+    };
+    let flags = SWP_NOACTIVATE
+        | if ctx.auto_center.load(Ordering::Relaxed) {
+            SET_WINDOW_POS_FLAGS(0)
+        } else {
+            SWP_NOMOVE
+        };
+    let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, required, height, flags);
+    let _ = InvalidateRect(Some(hwnd), None, true);
+}
+
 /// 跨线程改主浮窗左上的 claude_model 文本。设置对话框切 cc-switch 源
 /// 后调它立刻看到新 tag。
 /// 实现：把 String 装箱进 raw ptr，PostMessage 给主线程，主线程在
@@ -331,6 +354,14 @@ pub fn create_and_run(
                         s.net_up = sample.net_upload_bps;
                         s.net_down = sample.net_download_bps;
                         s.proxy_enabled = sample.proxy_enabled;
+                        // 推一个流量采样到滚动窗口（detailed sparkline 用）
+                        if s.traffic_history.len() >= render::TRAFFIC_HISTORY_CAP {
+                            s.traffic_history.pop_front();
+                        }
+                        s.traffic_history.push_back(render::TrafficSample {
+                            up_bps: sample.net_upload_bps,
+                            down_bps: sample.net_download_bps,
+                        });
                         drop(s);
                         need_repaint = true;
                     }
@@ -353,6 +384,10 @@ pub fn create_and_run(
                     // Re-center on resize only if the user hasn't manually
                     // positioned the window. If they have, just change width
                     // and leave the X/Y alone via SWP_NOMOVE.
+                    let height = {
+                        let s = lock_state(&state);
+                        render::window_height_for(&s.overlay_form)
+                    };
                     if ctx_loop.auto_center.load(Ordering::Relaxed) {
                         let (x, y) = compute_window_origin(hwnd, required);
                         let _ = SetWindowPos(
@@ -361,7 +396,7 @@ pub fn create_and_run(
                             x,
                             y,
                             required,
-                            WIN_HEIGHT,
+                            height,
                             SWP_NOACTIVATE,
                         );
                     } else {
@@ -371,7 +406,7 @@ pub fn create_and_run(
                             0,
                             0,
                             required,
-                            WIN_HEIGHT,
+                            height,
                             SWP_NOMOVE | SWP_NOACTIVATE,
                         );
                     }
@@ -656,6 +691,18 @@ unsafe extern "system" fn window_proc(
                             })
                             .ok();
                     }
+                    tray::IDM_USAGE_DETAIL => {
+                        // AI 用量明细窗口
+                        let parent_raw = hwnd.0 as usize;
+                        std::thread::Builder::new()
+                            .name("vpn-monitor-usage".into())
+                            .spawn(move || {
+                                let parent = HWND(parent_raw as *mut _);
+                                let mut dlg = super::usage_dialog::UsageDialog::new();
+                                dlg.show(parent);
+                            })
+                            .ok();
+                    }
                     tray::IDM_ADVANCED => {
                         // 高级设置对话框 —— 独立线程跑自己的消息泵
                         let runtime_flags = ctx.runtime_flags.clone();
@@ -681,6 +728,35 @@ unsafe extern "system" fn window_proc(
                             let log_dir = d.join("Vpn_Monitor");
                             tray::open_external(&log_dir);
                         }
+                    }
+                    tray::IDM_FORM_SIMPLE | tray::IDM_FORM_DETAILED => {
+                        let new_form = if id == tray::IDM_FORM_DETAILED {
+                            "detailed"
+                        } else {
+                            "simple"
+                        };
+                        if let Ok(mut g) = ctx.runtime_flags.overlay_form.write() {
+                            *g = new_form.to_string();
+                        }
+                        if let Ok(mut s) = ctx.state.lock() {
+                            s.overlay_form = new_form.to_string();
+                        }
+                        recalc_overlay_width(hwnd, ctx);
+                    }
+                    tray::IDM_ROW2_SYSTEM | tray::IDM_ROW2_USAGE => {
+                        let new_mode = if id == tray::IDM_ROW2_USAGE {
+                            "usage"
+                        } else {
+                            "system"
+                        };
+                        if let Ok(mut g) = ctx.runtime_flags.row2_mode.write() {
+                            *g = new_mode.to_string();
+                        }
+                        if let Ok(mut s) = ctx.state.lock() {
+                            s.row2_mode = new_mode.to_string();
+                        }
+                        // row2 内容不同宽，也重算
+                        recalc_overlay_width(hwnd, ctx);
                     }
                     tray::IDM_QUIT => {
                         let _ = DestroyWindow(hwnd);

@@ -14,12 +14,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MB_OK, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNOACTIVATE,
 };
 
-mod cc_switch;
-mod config;
 mod gui;
 mod monitor;
-mod network;
-mod runtime;
+mod tcp_table;
+
+// 把 core crate 的子模块 re-export 成本地 `crate::xxx`，让 gui/* 等子模块原有
+// `crate::config::...` / `crate::network::...` 等路径不用动。
+// 这是过渡阶段的简化策略；后续可逐步迁移到直接 `vpn_monitor_core::...`。
+pub use vpn_monitor_core::{cc_switch, config, network, runtime};
 
 use gui::render::{CheckStatus, IpUpdate, OverlayState, SharedState};
 use gui::window::UiUpdate;
@@ -230,6 +232,10 @@ fn main() {
         opacity: config.opacity,
         claude_model,
         theme: initial_theme,
+        overlay_form: config.overlay_form.clone(),
+        row2_mode: config.row2_mode.clone(),
+        usage_5h_limit_requests: config.usage_5h_limit_requests,
+        usage_week_limit_requests: config.usage_week_limit_requests,
         ..Default::default()
     }));
 
@@ -522,6 +528,94 @@ fn main() {
             }
         })
         .ok();
+
+    // 流量分流可视化 task：每 10s 扫一次活跃 TCP 远端 IP，按 geo_cache 命中
+    // 国家聚合写到 state.traffic_by_country。仅当浮窗 form == detailed 才有意义，
+    // 但任务始终在跑（开销极小，~1ms 一次 GetExtendedTcpTable + 哈希聚合）
+    {
+        let traffic_state = state.clone();
+        let traffic_cache = geo_cache.clone();
+        std::thread::Builder::new()
+            .name("vpn-monitor-tcp-table".into())
+            .spawn(move || loop {
+                let dist = tcp_table::summarize_by_country(traffic_cache.as_ref(), 5);
+                if let Ok(mut s) = traffic_state.lock() {
+                    s.traffic_by_country = dist;
+                }
+                std::thread::sleep(Duration::from_secs(10));
+            })
+            .ok();
+    }
+
+    // 代理 RPC 探测 task（Clash / Mihomo / sing-box 当前节点名）
+    // 间隔 5s 足够 —— 切节点不是常态操作。client_clone 与 IP 轮询共享同一个
+    // reqwest::Client，连接池复用。
+    {
+        let rpc_state = state.clone();
+        let rpc_client = client.clone();
+        rt.spawn(async move {
+            loop {
+                let snap = vpn_monitor_core::proxy_rpc::detect(&rpc_client).await;
+                if let Ok(mut s) = rpc_state.lock() {
+                    s.proxy_rpc = snap;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+    }
+
+    // DNS + v6 泄漏检测 task。开销大（3 个并发 HTTPS），间隔放长到 2 分钟。
+    // 用最新的 v4 country 作为基准对比。
+    {
+        let leak_state = state.clone();
+        let leak_client = client.clone();
+        rt.spawn(async move {
+            // 启动后稍等一下让 IP 轮询拿到 v4 country
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            loop {
+                let v4_country = {
+                    let s = match leak_state.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    s.current_update
+                        .geo
+                        .as_ref()
+                        .map(|g| g.country.clone())
+                };
+                let report = vpn_monitor_core::network::leak_check::check_leaks(
+                    &leak_client,
+                    v4_country.as_deref(),
+                    Duration::from_secs(3),
+                )
+                .await;
+                if let Ok(mut s) = leak_state.lock() {
+                    s.leak = Some(report);
+                }
+                tokio::time::sleep(Duration::from_secs(120)).await;
+            }
+        });
+    }
+
+    // cc-switch SQLite 用量刷新 task —— 每 N 秒重读 5h/周用量并写到 state
+    let usage_refresh_interval = config.usage_refresh_interval;
+    if usage_refresh_interval > 0 {
+        let usage_state = state.clone();
+        let usage_source = runtime_flags.active_cc_switch_provider.clone();
+        rt.spawn(async move {
+            loop {
+                let source = usage_source
+                    .read()
+                    .map(|g| g.clone())
+                    .unwrap_or_else(|p| p.into_inner().clone());
+                let usage = vpn_monitor_core::usage::read_usage_stats(&source);
+                if let Ok(mut s) = usage_state.lock() {
+                    s.usage = usage;
+                }
+                tokio::time::sleep(Duration::from_secs(usage_refresh_interval)).await;
+            }
+        });
+    }
 
     // Claude / CC-Switch model refresh task —— 每 N 秒重读一次 active
     // provider 的当前模型名。`active_cc_switch_provider` 通过 RwLock 共享，

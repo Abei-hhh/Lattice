@@ -7,4 +7,5 @@ pub mod render;
 pub mod settings_dialog;
 pub mod theme;
 pub mod tray;
+pub mod usage_dialog;
 pub mod window;
