@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Vpn Monitor 应用图标
+     主题：盾形 = 安全保护；内嵌 3 个相连节点 = VPN 节点 / 地球网络
+     主色绿色 #4CAF50 与浮窗 ACCENT_GREEN 一致 -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- 圆角盾形背景 -->
+  <path d="M 128 16
+           C 88 16, 56 28, 32 40
+           L 32 128
+           C 32 184, 80 224, 128 240
+           C 176 224, 224 184, 224 128
+           L 224 40
+           C 200 28, 168 16, 128 16 Z"
+        fill="#2D2D2D" stroke="#4CAF50" stroke-width="8" stroke-linejoin="round"/>
+
+  <!-- 内部 3 节点 + 连线（节点拓扑示意） -->
+  <!-- 连线先画，避免压住节点 -->
+  <line x1="80" y1="100" x2="128" y2="140" stroke="#4CAF50" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+  <line x1="176" y1="100" x2="128" y2="140" stroke="#4CAF50" stroke-width="6" stroke-linecap="round" opacity="0.7"/>
+  <line x1="80" y1="100" x2="176" y2="100" stroke="#4CAF50" stroke-width="6" stroke-linecap="round" opacity="0.4"/>
+
+  <!-- 左上节点 -->
+  <circle cx="80" cy="100" r="14" fill="#4CAF50"/>
+  <!-- 右上节点 -->
+  <circle cx="176" cy="100" r="14" fill="#4CAF50"/>
+  <!-- 底部主节点（稍大，代表当前出口） -->
+  <circle cx="128" cy="140" r="22" fill="#4CAF50"/>
+  <circle cx="128" cy="140" r="10" fill="#FFFFFF"/>
+</svg>

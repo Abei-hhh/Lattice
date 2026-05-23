@@ -2,10 +2,14 @@ use windows::core::{s, w};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleA;
+use windows::Win32::UI::Controls::DRAWITEMSTRUCT;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use std::sync::Arc;
+
+use crate::network::geo_cache::GeoCache;
 use crate::network::geo_lookup;
 use crate::network::geo_lookup::GeoInfo;
 
@@ -38,16 +42,31 @@ pub struct LookupDialog {
     result_hwnd: HWND,
     error_hwnd: HWND,
     client: reqwest::Client,
+    geo_cache: Option<Arc<GeoCache>>,
+    /// 可选的初始 IP — 由历史窗口"双击重查"传入；WM_CREATE 完成后
+    /// 自动写到输入框并立即触发一次查询。
+    initial_ip: Option<String>,
 }
 
 impl LookupDialog {
-    pub fn new(client: reqwest::Client) -> Self {
+    pub fn new(client: reqwest::Client, geo_cache: Option<Arc<GeoCache>>) -> Self {
+        Self::with_initial_ip(client, geo_cache, None)
+    }
+
+    /// 带初始 IP 的构造 —— 历史窗口"双击行重查"走这条。
+    pub fn with_initial_ip(
+        client: reqwest::Client,
+        geo_cache: Option<Arc<GeoCache>>,
+        initial_ip: Option<String>,
+    ) -> Self {
         Self {
             hwnd: HWND::default(),
             input_hwnd: HWND::default(),
             result_hwnd: HWND::default(),
             error_hwnd: HWND::default(),
             client,
+            geo_cache,
+            initial_ip,
         }
     }
 
@@ -57,12 +76,15 @@ impl LookupDialog {
             let hinstance: HINSTANCE = hmodule.into();
             let class_name = w!("VpnMonitorLookup");
 
+            let app_icon = LoadIconW(Some(hinstance), windows::core::PCWSTR(1 as *const _))
+                .unwrap_or_default();
             let wc = WNDCLASSW {
                 hInstance: hinstance,
                 lpszClassName: class_name,
                 lpfnWndProc: Some(dialog_proc),
                 hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
                 hbrBackground: GetSysColorBrush(COLOR_3DFACE),
+                hIcon: app_icon,
                 ..Default::default()
             };
 
@@ -88,6 +110,10 @@ impl LookupDialog {
                     return;
                 }
             };
+
+            // 标题栏跟随主题（暗色模式下标题栏不再是 white-on-white 突兀）
+            let mode = crate::config::load_config(Some(crate::config::config_path())).theme;
+            super::theme::apply_dark_titlebar(hwnd, super::theme::is_active_dark(&mode));
 
             self.hwnd = hwnd;
             center_window(hwnd);
@@ -186,7 +212,7 @@ unsafe extern "system" fn dialog_proc(
                 WINDOW_EX_STYLE::default(),
                 w!("BUTTON"),
                 w!("查询"),
-                WS_VISIBLE | WS_CHILD,
+                WS_VISIBLE | WS_CHILD | super::md3::BS_OWNERDRAW_STYLE,
                 305,
                 17,
                 70,
@@ -233,7 +259,7 @@ unsafe extern "system" fn dialog_proc(
                 WINDOW_EX_STYLE::default(),
                 w!("BUTTON"),
                 w!("复制结果"),
-                WS_VISIBLE | WS_CHILD,
+                WS_VISIBLE | WS_CHILD | super::md3::BS_OWNERDRAW_STYLE,
                 100,
                 270,
                 90,
@@ -248,7 +274,7 @@ unsafe extern "system" fn dialog_proc(
                 WINDOW_EX_STYLE::default(),
                 w!("BUTTON"),
                 w!("关闭"),
-                WS_VISIBLE | WS_CHILD,
+                WS_VISIBLE | WS_CHILD | super::md3::BS_OWNERDRAW_STYLE,
                 210,
                 270,
                 90,
@@ -264,9 +290,30 @@ unsafe extern "system" fn dialog_proc(
             (*dialog_ptr).error_hwnd = error;
             (*dialog_ptr).hwnd = hwnd;
 
+            // 若构造时带了初始 IP（历史窗口"双击重查"路径），把它写入
+            // 输入框并自动触发一次查询按钮，让用户无需手动点。
+            if let Some(ip) = (*dialog_ptr).initial_ip.clone() {
+                set_wnd_text(input, &ip);
+                let _ = PostMessageW(
+                    Some(hwnd),
+                    WM_COMMAND,
+                    WPARAM(ID_LOOKUP_BTN),
+                    LPARAM(0),
+                );
+            }
+
             let _ = SetFocus(Some(input));
 
             LRESULT(0)
+        }
+        WM_DRAWITEM => {
+            // 三个 owner-draw 按钮统一走 md3::draw_button
+            let dis = &*(lparam.0 as *const DRAWITEMSTRUCT);
+            let is_primary = dis.CtlID == ID_LOOKUP_BTN as u32;
+            let mode = crate::config::load_config(Some(crate::config::config_path())).theme;
+            let theme = super::theme::resolve(&mode);
+            super::md3::draw_button(dis, &theme, is_primary);
+            LRESULT(1)
         }
         WM_COMMAND => {
             let id = wparam.0 & 0xFFFF;
@@ -281,9 +328,23 @@ unsafe extern "system" fn dialog_proc(
                             set_wnd_text((*dialog_ptr).error_hwnd, "请输入IP地址");
                         } else {
                             set_wnd_text((*dialog_ptr).error_hwnd, "");
+
+                            // Cache fast-path: if the IP is already in the
+                            // geo cache (same /24, fresh) just show it without
+                            // touching the network. Marks the result with
+                            // [缓存] so the user knows it might be stale.
+                            if let Some(cache) = &(*dialog_ptr).geo_cache {
+                                if let Some(geo) = cache.get(&trimmed) {
+                                    let mut text = format_geo_result(&trimmed, &geo);
+                                    text.push_str("\n\n[来自本地缓存]");
+                                    set_wnd_text((*dialog_ptr).result_hwnd, &text);
+                                    return LRESULT(0);
+                                }
+                            }
                             set_wnd_text((*dialog_ptr).result_hwnd, "查询中...");
 
                             let client = (*dialog_ptr).client.clone();
+                            let cache_clone = (*dialog_ptr).geo_cache.clone();
                             // Capture the dialog HWND as a usize for the worker;
                             // the worker posts a message back instead of touching
                             // child HWNDs directly. If the dialog is gone by the
@@ -301,14 +362,30 @@ unsafe extern "system" fn dialog_proc(
                                         let geo = rt.block_on(async {
                                             let timeout =
                                                 std::time::Duration::from_secs(5);
+                                            // Manual lookup: prefer latency over
+                                            // cross-checking — the user is staring
+                                            // at the dialog waiting.
                                             geo_lookup::lookup_geo(
-                                                &client, &trimmed, timeout,
+                                                &client, &trimmed, timeout, false,
                                             )
                                             .await
                                         });
+                                        // Side-effect: populate the cache so
+                                        // subsequent lookups of the same /24
+                                        // hit the fast path.
+                                        if let (geo_lookup::GeoLookupOutcome::Ok { geo: g, .. }, Some(cache)) =
+                                            (&geo, cache_clone)
+                                        {
+                                            cache.insert(trimmed.clone(), g.clone());
+                                        }
                                         let result_text = match geo {
-                                            geo_lookup::GeoLookupOutcome::Ok(geo) => {
-                                                format_geo_result(&trimmed, &geo)
+                                            geo_lookup::GeoLookupOutcome::Ok { geo, warning } => {
+                                                let mut t = format_geo_result(&trimmed, &geo);
+                                                if let Some(w) = warning {
+                                                    t.push_str("\n\n⚠ ");
+                                                    t.push_str(&w);
+                                                }
+                                                t
                                             }
                                             geo_lookup::GeoLookupOutcome::RateLimited => {
                                                 format!(

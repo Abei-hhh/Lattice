@@ -1,13 +1,28 @@
+//! IP → 归属地查询。
+//!
+//! **双 provider 策略**：
+//! - `ipwho.is` 走 HTTPS（防中间人篡改 country）
+//! - `ip-api.com` 走 HTTP（更快但可被劫持）
+//!
+//! 当 `cross_check = true`（默认）：等两个 provider 都完成 → 优先用
+//! HTTPS 结果 → 若两边国别不一致，回传 warning 让 UI 显示 ⚠ 标记。
+//!
+//! 当 `cross_check = false`：竞速取最快 Ok 的那个（手动 lookup 对话框走这条）。
+
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeoInfo {
+    #[serde(default)]
     pub country: String,
+    #[serde(default)]
     pub region: String,
+    #[serde(default)]
     pub city: String,
+    #[serde(default)]
     pub isp: String,
 }
 
@@ -49,7 +64,14 @@ impl GeoFailReason {
 }
 
 pub enum GeoLookupOutcome {
-    Ok(GeoInfo),
+    /// `warning` is `Some(label)` when the HTTPS and HTTP providers reported
+    /// different country names in a cross-check run — the displayed result is
+    /// the HTTPS one, but the UI surfaces the warning so the user knows their
+    /// HTTP-fetched geo could have been MITM-spoofed.
+    Ok {
+        geo: GeoInfo,
+        warning: Option<String>,
+    },
     RateLimited,
     Failed(GeoFailReason),
 }
@@ -119,30 +141,113 @@ fn classify_reqwest_error(e: &reqwest::Error) -> GeoFailReason {
     GeoFailReason::Other
 }
 
-pub async fn lookup_geo(client: &Client, ip: &str, timeout: Duration) -> GeoLookupOutcome {
+/// Look up geo info for `ip`. When `cross_check` is true, both providers run
+/// concurrently and we wait for both, preferring the HTTPS provider
+/// (`ipwho.is`) when both succeed. If the two providers report different
+/// non-empty country names we log a warning — that means an HTTP-layer
+/// response was likely tampered with, or one provider's data is stale.
+/// When `cross_check` is false, the providers race and the first `Ok` wins
+/// (latency-optimal but no MITM mitigation for ip-api.com).
+pub async fn lookup_geo(
+    client: &Client,
+    ip: &str,
+    timeout: Duration,
+    cross_check: bool,
+) -> GeoLookupOutcome {
+    let c1 = client.clone();
+    let c2 = client.clone();
+    let ip1 = ip.to_string();
+    let ip2 = ip.to_string();
+    let mut h_http = tokio::spawn(async move { lookup_ip_api(&c1, &ip1, timeout).await });
+    let mut h_https = tokio::spawn(async move { lookup_ipwho_is(&c2, &ip2, timeout).await });
+
     let mut saw_rate_limit = false;
     let mut reasons: Vec<GeoFailReason> = Vec::new();
 
-    match lookup_ip_api(client, ip, timeout).await {
-        ProviderOutcome::Ok(g) => return GeoLookupOutcome::Ok(g),
-        ProviderOutcome::RateLimited => saw_rate_limit = true,
-        ProviderOutcome::Failed(r) => reasons.push(r),
-    }
+    if cross_check {
+        // Wait for BOTH, prefer HTTPS. The latency cost is at most one
+        // provider's timeout (3s); average ~one provider's actual response
+        // time since both run concurrently.
+        let (r_https, r_http) = tokio::join!(&mut h_https, &mut h_http);
 
-    match lookup_ipwho_is(client, ip, timeout).await {
-        ProviderOutcome::Ok(g) => return GeoLookupOutcome::Ok(g),
-        ProviderOutcome::RateLimited => saw_rate_limit = true,
-        ProviderOutcome::Failed(r) => reasons.push(r),
+        let mut warning: Option<String> = None;
+        // If both succeeded with non-empty countries, flag any disagreement.
+        if let (Ok(ProviderOutcome::Ok(g_https)), Ok(ProviderOutcome::Ok(g_http))) =
+            (&r_https, &r_http)
+        {
+            if !g_https.country.is_empty()
+                && !g_http.country.is_empty()
+                && g_https.country != g_http.country
+            {
+                tracing::warn!(
+                    "Geo cross-check MISMATCH for {}: ipwho.is(HTTPS)={} vs ip-api(HTTP)={} — possible MITM or stale data; using HTTPS",
+                    crate::network::ip_fetcher::mask_ip(ip),
+                    g_https.country,
+                    g_http.country
+                );
+                warning = Some(format!("跨源不一致: HTTPS={}/HTTP={}", g_https.country, g_http.country));
+            }
+        }
+
+        match r_https {
+            Ok(ProviderOutcome::Ok(g)) => return GeoLookupOutcome::Ok { geo: g, warning },
+            Ok(ProviderOutcome::RateLimited) => saw_rate_limit = true,
+            Ok(ProviderOutcome::Failed(r)) => reasons.push(r),
+            Err(_) => reasons.push(GeoFailReason::Other),
+        }
+        match r_http {
+            Ok(ProviderOutcome::Ok(g)) => {
+                // HTTPS provider failed, fell back to HTTP — surface that
+                // the answer is from an untrusted (MITMable) source so the
+                // user can take it with a grain of salt.
+                return GeoLookupOutcome::Ok {
+                    geo: g,
+                    warning: Some("仅 HTTP 源（HTTPS 失败）".to_string()),
+                };
+            }
+            Ok(ProviderOutcome::RateLimited) => saw_rate_limit = true,
+            Ok(ProviderOutcome::Failed(r)) => reasons.push(r),
+            Err(_) => reasons.push(GeoFailReason::Other),
+        }
+    } else {
+        // Race: take whichever finishes first.
+        let (first, second_handle) = tokio::select! {
+            r = &mut h_http => (r, h_https),
+            r = &mut h_https => (r, h_http),
+        };
+
+        match first {
+            Ok(ProviderOutcome::Ok(g)) => {
+                second_handle.abort();
+                return GeoLookupOutcome::Ok { geo: g, warning: None };
+            }
+            Ok(ProviderOutcome::RateLimited) => saw_rate_limit = true,
+            Ok(ProviderOutcome::Failed(r)) => reasons.push(r),
+            Err(_) => reasons.push(GeoFailReason::Other),
+        }
+        match second_handle.await {
+            Ok(ProviderOutcome::Ok(g)) => return GeoLookupOutcome::Ok { geo: g, warning: None },
+            Ok(ProviderOutcome::RateLimited) => saw_rate_limit = true,
+            Ok(ProviderOutcome::Failed(r)) => reasons.push(r),
+            Err(_) => reasons.push(GeoFailReason::Other),
+        }
     }
 
     if saw_rate_limit {
-        tracing::warn!("All geo providers rate-limited for {}", ip);
+        tracing::warn!(
+            "All geo providers rate-limited for {}",
+            crate::network::ip_fetcher::mask_ip(ip)
+        );
         return GeoLookupOutcome::RateLimited;
     }
 
     reasons.sort_by_key(|r| r.priority());
     let reason = reasons.into_iter().next().unwrap_or(GeoFailReason::Other);
-    tracing::warn!("All geo providers failed for {}: {}", ip, reason.label());
+    tracing::warn!(
+        "All geo providers failed for {}: {}",
+        crate::network::ip_fetcher::mask_ip(ip),
+        reason.label()
+    );
     GeoLookupOutcome::Failed(reason)
 }
 
@@ -160,11 +265,11 @@ async fn lookup_ip_api(client: &Client, ip: &str, timeout: Duration) -> Provider
     let resp = match result {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            tracing::warn!("ip-api.com request failed for {}: {}", ip, e);
+            tracing::warn!("ip-api.com request failed for {}: {}", crate::network::ip_fetcher::mask_ip(ip), e);
             return ProviderOutcome::Failed(classify_reqwest_error(&e));
         }
         Err(_) => {
-            tracing::warn!("ip-api.com timed out for {}", ip);
+            tracing::warn!("ip-api.com timed out for {}", crate::network::ip_fetcher::mask_ip(ip));
             return ProviderOutcome::Failed(GeoFailReason::Timeout);
         }
     };
@@ -186,7 +291,7 @@ async fn lookup_ip_api(client: &Client, ip: &str, timeout: Duration) -> Provider
             if lower.contains("rate") || lower.contains("quota") || lower.contains("limit") {
                 ProviderOutcome::RateLimited
             } else {
-                tracing::warn!("ip-api.com non-success for {}: {}", ip, msg);
+                tracing::warn!("ip-api.com non-success for {}: {}", crate::network::ip_fetcher::mask_ip(ip), msg);
                 ProviderOutcome::Failed(classify_api_message(&msg))
             }
         }
@@ -211,11 +316,11 @@ async fn lookup_ipwho_is(client: &Client, ip: &str, timeout: Duration) -> Provid
     let resp = match result {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
-            tracing::warn!("ipwho.is request failed for {}: {}", ip, e);
+            tracing::warn!("ipwho.is request failed for {}: {}", crate::network::ip_fetcher::mask_ip(ip), e);
             return ProviderOutcome::Failed(classify_reqwest_error(&e));
         }
         Err(_) => {
-            tracing::warn!("ipwho.is timed out for {}", ip);
+            tracing::warn!("ipwho.is timed out for {}", crate::network::ip_fetcher::mask_ip(ip));
             return ProviderOutcome::Failed(GeoFailReason::Timeout);
         }
     };
@@ -237,7 +342,7 @@ async fn lookup_ipwho_is(client: &Client, ip: &str, timeout: Duration) -> Provid
             if lower.contains("rate") || lower.contains("quota") || lower.contains("limit") {
                 ProviderOutcome::RateLimited
             } else {
-                tracing::warn!("ipwho.is non-success for {}: {}", ip, msg);
+                tracing::warn!("ipwho.is non-success for {}: {}", crate::network::ip_fetcher::mask_ip(ip), msg);
                 ProviderOutcome::Failed(classify_api_message(&msg))
             }
         }

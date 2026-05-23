@@ -4,16 +4,11 @@ use windows::Win32::Graphics::Gdi::*;
 
 use crate::network::geo_lookup::GeoInfo;
 
+use super::theme::Theme;
+
+// BG_COLOR 保留作为 WNDCLASS 注册时的默认背景画刷（窗口创建一次性用），
+// 实际绘制走 state.theme。窗口创建后 theme 切换会触发 InvalidateRect 重画。
 pub const BG_COLOR: COLORREF = COLORREF(0x00_2D_2D_2D);
-const TEXT_PRIMARY: COLORREF = COLORREF(0x00_FF_FF_FF);
-const TEXT_SECONDARY: COLORREF = COLORREF(0x00_B3_B3_B0);
-const TEXT_DIM: COLORREF = COLORREF(0x00_88_88_88);
-const TEXT_LATENCY: COLORREF = COLORREF(0x00_8A_BE_CE);
-const ACCENT_GREEN: COLORREF = COLORREF(0x00_50_AF_4C);
-const ACCENT_RED: COLORREF = COLORREF(0x00_36_43_F4);
-const ACCENT_BLUE: COLORREF = COLORREF(0x00_F3_96_21);
-const ACCENT_ORANGE: COLORREF = COLORREF(0x00_00_6F_FF);
-const SEPARATOR_COLOR: COLORREF = COLORREF(0x00_55_55_55);
 
 const LWA_ALPHA_RAW: u32 = 0x02;
 pub const ROW_HEIGHT: i32 = 26;
@@ -38,6 +33,9 @@ pub struct IpUpdate {
     /// Short reason string shown when status == Success but geo lookup failed,
     /// e.g. "超时" / "私有段" / "限流".
     pub geo_error_reason: Option<String>,
+    /// Non-fatal advisory shown next to a successful geo result, e.g. a
+    /// cross-source country mismatch warning. Rendered as an orange ⚠ in row 1.
+    pub geo_warning: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -52,6 +50,9 @@ pub struct OverlayState {
     pub net_up: u64,
     pub net_down: u64,
     pub claude_model: String,
+    /// 当前活动主题色板（从 RuntimeFlags.theme_mode 同步过来）。
+    /// 切主题时主线程读 mode → 调 theme::resolve → 写回这里 → InvalidateRect。
+    pub theme: Theme,
 }
 
 impl Default for OverlayState {
@@ -64,6 +65,7 @@ impl Default for OverlayState {
                 latency_ms: None,
                 error_reason: None,
                 geo_error_reason: None,
+                geo_warning: None,
             },
             visible: true,
             show_isp: true,
@@ -74,6 +76,7 @@ impl Default for OverlayState {
             net_up: 0,
             net_down: 0,
             claude_model: String::new(),
+            theme: super::theme::DARK,
         }
     }
 }
@@ -177,6 +180,13 @@ fn measure_row1(hdc: HDC, state: &OverlayState) -> i32 {
         x += txt_width(hdc, &format!("{}ms", ms)) + 6;
     }
 
+    // Cross-source warning ⚠
+    if let Some(warn) = &update.geo_warning {
+        x += 12; // sep
+        x += txt_width(hdc, "\u{26A0}") + 6;
+        x += txt_width(hdc, warn) + 6;
+    }
+
     if !state.proxy_enabled {
         x += 12; // gap
         x += txt_width(hdc, "未设置代理") + 6;
@@ -206,8 +216,10 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
     unsafe {
         let mut ps = PAINTSTRUCT::default();
         let hdc = BeginPaint(hwnd, &mut ps);
+        let th = &state.theme;
 
-        let bg_brush = CreateSolidBrush(BG_COLOR);
+        // 整窗背景：每次都按当前 theme 重画，无需 WNDCLASS 默认画刷
+        let bg_brush = CreateSolidBrush(th.bg);
         let full_rect = RECT { left: 0, top: 0, right: width, bottom: height };
         let _ = FillRect(hdc, &full_rect, bg_brush);
         let _ = DeleteObject(bg_brush.into());
@@ -217,7 +229,6 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
         let font = create_font();
         let old_font = SelectObject(hdc, font.into());
 
-        // Measure each row for horizontal centering
         let row1_w = measure_row1(hdc, state);
         let row2_w = measure_row2(hdc, state);
         let row1_offset = ((width - row1_w) / 2).max(0);
@@ -226,118 +237,109 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
         let update = &state.current_update;
         let max_x = width - 10;
 
-        // === Row 1: Status dot + IP + Location + Proxy ===
+        // === Row 1: 状态点 + IP + 归属地 + 代理 ===
         let dot_color = match update.status {
-            CheckStatus::Success => ACCENT_GREEN,
-            CheckStatus::NetworkError => ACCENT_RED,
-            CheckStatus::Checking => ACCENT_BLUE,
-            CheckStatus::ApiLimited => ACCENT_ORANGE,
+            CheckStatus::Success => th.accent_green,
+            CheckStatus::NetworkError => th.accent_red,
+            CheckStatus::Checking => th.accent_blue,
+            CheckStatus::ApiLimited => th.accent_orange,
         };
         draw_dot(hdc, 18 + row1_offset, ROW_HEIGHT / 2, 4, dot_color);
 
         let mut x: i32 = 30 + row1_offset;
 
-        // Claude model tag
         if !state.claude_model.is_empty() {
-            x = draw_text(hdc, &state.claude_model, x, 0, ROW_HEIGHT, TEXT_DIM, max_x);
-            x = draw_sep(hdc, x, 0, ROW_HEIGHT);
+            x = draw_text(hdc, &state.claude_model, x, 0, ROW_HEIGHT, th.fg_dim, max_x);
+            x = draw_sep(hdc, x, 0, ROW_HEIGHT, th.separator);
         }
 
         match &update.status {
             CheckStatus::Checking => {
-                x = draw_text(hdc, "检测中...", x, 0, ROW_HEIGHT, ACCENT_BLUE, max_x);
+                x = draw_text(hdc, "检测中...", x, 0, ROW_HEIGHT, th.accent_blue, max_x);
             }
             CheckStatus::NetworkError => {
-                // Keep last-known IP/geo on screen (dim) so the user can see
-                // what they were on before the failure — only the error label
-                // turns red. Matches measure_row1 layout exactly.
                 if let Some(ip) = update.ip.as_deref() {
-                    x = draw_text(hdc, ip, x, 0, ROW_HEIGHT, TEXT_DIM, max_x);
-                    x = draw_sep(hdc, x, 0, ROW_HEIGHT);
+                    x = draw_text(hdc, ip, x, 0, ROW_HEIGHT, th.fg_dim, max_x);
+                    x = draw_sep(hdc, x, 0, ROW_HEIGHT, th.separator);
                     if let Some(geo) = &update.geo {
                         x = draw_text(
-                            hdc,
-                            &format_location(geo),
-                            x,
-                            0,
-                            ROW_HEIGHT,
-                            TEXT_DIM,
-                            max_x,
+                            hdc, &format_location(geo), x, 0, ROW_HEIGHT, th.fg_dim, max_x,
                         );
-                        x = draw_sep(hdc, x, 0, ROW_HEIGHT);
+                        x = draw_sep(hdc, x, 0, ROW_HEIGHT, th.separator);
                     }
                 }
                 let err = format_network_error(update.error_reason.as_deref());
-                x = draw_text(hdc, &err, x, 0, ROW_HEIGHT, ACCENT_RED, max_x);
+                x = draw_text(hdc, &err, x, 0, ROW_HEIGHT, th.accent_red, max_x);
             }
             CheckStatus::ApiLimited => {
                 if let Some(ip) = update.ip.as_deref() {
-                    x = draw_text(hdc, ip, x, 0, ROW_HEIGHT, TEXT_PRIMARY, max_x);
-                    x = draw_sep(hdc, x, 0, ROW_HEIGHT);
+                    x = draw_text(hdc, ip, x, 0, ROW_HEIGHT, th.fg_primary, max_x);
+                    x = draw_sep(hdc, x, 0, ROW_HEIGHT, th.separator);
                 }
-                x = draw_text(hdc, "查询受限", x, 0, ROW_HEIGHT, ACCENT_ORANGE, max_x);
+                x = draw_text(hdc, "查询受限", x, 0, ROW_HEIGHT, th.accent_orange, max_x);
             }
             CheckStatus::Success => {
                 let ip_str = update.ip.as_deref().unwrap_or("--");
-                x = draw_text(hdc, ip_str, x, 0, ROW_HEIGHT, TEXT_PRIMARY, max_x);
-                x = draw_sep(hdc, x, 0, ROW_HEIGHT);
+                x = draw_text(hdc, ip_str, x, 0, ROW_HEIGHT, th.fg_primary, max_x);
+                x = draw_sep(hdc, x, 0, ROW_HEIGHT, th.separator);
 
                 if let Some(geo) = &update.geo {
                     let loc = format_location(geo);
-                    x = draw_text(hdc, &loc, x, 0, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+                    x = draw_text(hdc, &loc, x, 0, ROW_HEIGHT, th.fg_secondary, max_x);
                 } else {
-                    // Geo lookup failed but IP fetch succeeded — surface the
-                    // reason in dim color so the user knows it's the geo
-                    // provider that failed, not the network as a whole.
                     let placeholder =
                         format_geo_missing(update.geo_error_reason.as_deref());
-                    x = draw_text(hdc, &placeholder, x, 0, ROW_HEIGHT, TEXT_DIM, max_x);
+                    x = draw_text(hdc, &placeholder, x, 0, ROW_HEIGHT, th.fg_dim, max_x);
                 }
 
-                // Latency display
                 if let Some(ms) = update.latency_ms {
-                    x = draw_sep(hdc, x, 0, ROW_HEIGHT);
-                    let color = if ms < 200 { TEXT_LATENCY } else { ACCENT_ORANGE };
+                    x = draw_sep(hdc, x, 0, ROW_HEIGHT, th.separator);
+                    let color = if ms < 200 { th.fg_latency } else { th.accent_orange };
                     x = draw_text(hdc, &format!("{}ms", ms), x, 0, ROW_HEIGHT, color, max_x);
+                }
+
+                if let Some(warn) = &update.geo_warning {
+                    x = draw_sep(hdc, x, 0, ROW_HEIGHT, th.separator);
+                    x = draw_text(hdc, "\u{26A0}", x, 0, ROW_HEIGHT, th.accent_orange, max_x);
+                    x = draw_text(hdc, warn, x, 0, ROW_HEIGHT, th.accent_orange, max_x);
                 }
             }
         }
 
-        // Latency for non-success states (if we have it)
         if !matches!(update.status, CheckStatus::Success) {
             if let Some(ms) = update.latency_ms {
-                x = draw_sep(hdc, x, 0, ROW_HEIGHT);
-                x = draw_text(hdc, &format!("{}ms", ms), x, 0, ROW_HEIGHT, TEXT_LATENCY, max_x);
+                x = draw_sep(hdc, x, 0, ROW_HEIGHT, th.separator);
+                x = draw_text(hdc, &format!("{}ms", ms), x, 0, ROW_HEIGHT, th.fg_latency, max_x);
             }
         }
 
         if !state.proxy_enabled {
-            draw_text(hdc, "未设置代理", x + 12, 0, ROW_HEIGHT, TEXT_DIM, max_x);
+            draw_text(hdc, "未设置代理", x + 12, 0, ROW_HEIGHT, th.fg_dim, max_x);
         }
 
-        // === Row separator ===
+        // 行分隔线
         {
-            let sep_brush = CreateSolidBrush(SEPARATOR_COLOR);
+            let sep_brush = CreateSolidBrush(th.separator);
             let sep_rect = RECT { left: 10, top: ROW_HEIGHT - 1, right: width - 10, bottom: ROW_HEIGHT };
             let _ = FillRect(hdc, &sep_rect, sep_brush);
             let _ = DeleteObject(sep_brush.into());
         }
 
-        // === Row 2: Net speed + CPU + Memory ===
+        // === Row 2: 网速 + CPU + 内存 ===
         let y2 = ROW_HEIGHT;
         let mut x2: i32 = 18 + row2_offset;
 
-        x2 = draw_text(hdc, "\u{2191}", x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
-        x2 = draw_text(hdc, &format_speed(state.net_up), x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+        x2 = draw_text(hdc, "\u{2191}", x2, y2, ROW_HEIGHT, th.fg_secondary, max_x);
+        x2 = draw_text(hdc, &format_speed(state.net_up), x2, y2, ROW_HEIGHT, th.fg_secondary, max_x);
 
-        x2 = draw_text(hdc, "\u{2193}", x2 + 6, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
-        x2 = draw_text(hdc, &format_speed(state.net_down), x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+        x2 = draw_text(hdc, "\u{2193}", x2 + 6, y2, ROW_HEIGHT, th.fg_secondary, max_x);
+        x2 = draw_text(hdc, &format_speed(state.net_down), x2, y2, ROW_HEIGHT, th.fg_secondary, max_x);
 
-        x2 = draw_sep(hdc, x2 + 2, y2, ROW_HEIGHT);
-        x2 = draw_text(hdc, &format!("CPU {:.0}%", state.cpu_usage), x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+        x2 = draw_sep(hdc, x2 + 2, y2, ROW_HEIGHT, th.separator);
+        x2 = draw_text(hdc, &format!("CPU {:.0}%", state.cpu_usage), x2, y2, ROW_HEIGHT, th.fg_secondary, max_x);
 
-        x2 = draw_sep(hdc, x2 + 2, y2, ROW_HEIGHT);
-        draw_text(hdc, &format!("内存 {:.0}%", state.mem_usage), x2, y2, ROW_HEIGHT, TEXT_SECONDARY, max_x);
+        x2 = draw_sep(hdc, x2 + 2, y2, ROW_HEIGHT, th.separator);
+        draw_text(hdc, &format!("内存 {:.0}%", state.mem_usage), x2, y2, ROW_HEIGHT, th.fg_secondary, max_x);
 
         let _ = SelectObject(hdc, old_font);
         let _ = DeleteObject(font.into());
@@ -422,8 +424,8 @@ unsafe fn draw_text(hdc: HDC, text: &str, x: i32, y: i32, h: i32, color: COLORRE
     x + text_w + 6
 }
 
-unsafe fn draw_sep(hdc: HDC, x: i32, y: i32, h: i32) -> i32 {
-    let brush = CreateSolidBrush(SEPARATOR_COLOR);
+unsafe fn draw_sep(hdc: HDC, x: i32, y: i32, h: i32, color: COLORREF) -> i32 {
+    let brush = CreateSolidBrush(color);
     let rect = RECT { left: x, top: y + h / 2 - 6, right: x + 1, bottom: y + h / 2 + 6 };
     let _ = FillRect(hdc, &rect, brush);
     let _ = DeleteObject(brush.into());

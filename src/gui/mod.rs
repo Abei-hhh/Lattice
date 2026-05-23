@@ -1,4 +1,10 @@
+pub mod history_dialog;
 pub mod hotkey;
 pub mod lookup_dialog;
+pub mod md3;
+pub mod overlay_state;
 pub mod render;
+pub mod settings_dialog;
+pub mod theme;
+pub mod tray;
 pub mod window;

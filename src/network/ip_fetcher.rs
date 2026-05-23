@@ -1,5 +1,14 @@
+//! 公网 IP 抓取 + 日志脱敏工具。
+//!
+//! - 并发请求 3 个免费 IP 源（ipify / ip.sb / ifconfig.me），任一成功即返回；
+//!   全失败时按"诊断价值"聚合失败原因（DNS > Connect > TLS > Timeout > ...）。
+//! - `mask_ip` / `mask_geo` / `mask_proxy_url` 给日志路径用 —— 浮窗仍显
+//!   示真值，只让磁盘日志变得不可反查用户隐私。
+//! - 掩码开关是 `AtomicBool`，托盘菜单 / 设置对话框可运行时翻转。
+
 use reqwest::Client;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time;
 
@@ -8,6 +17,82 @@ const IP_SOURCES: &[&str] = &[
     "https://api.ip.sb/ip",
     "https://ifconfig.me/ip",
 ];
+
+/// Runtime-toggleable mask flags. Default true (safest); the tray menu and
+/// config loader can flip them. `AtomicBool` so the toggle takes effect on
+/// the next tracing call without restart.
+static MASK_IP_LOGS: AtomicBool = AtomicBool::new(true);
+static MASK_GEO_LOGS: AtomicBool = AtomicBool::new(true);
+
+pub fn set_mask_ip_logs(enabled: bool) {
+    MASK_IP_LOGS.store(enabled, Ordering::Relaxed);
+}
+
+pub fn set_mask_geo_logs(enabled: bool) {
+    MASK_GEO_LOGS.store(enabled, Ordering::Relaxed);
+}
+
+pub fn get_mask_ip_logs() -> bool {
+    MASK_IP_LOGS.load(Ordering::Relaxed)
+}
+
+pub fn get_mask_geo_logs() -> bool {
+    MASK_GEO_LOGS.load(Ordering::Relaxed)
+}
+
+/// Render a geo string (country/city/ISP) for logging. When masking is on,
+/// non-empty values become a stable 8-char hash so the log can still tell
+/// "did the city change between line A and line B?" without revealing where.
+pub fn mask_geo(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    if !MASK_GEO_LOGS.load(Ordering::Relaxed) {
+        return value.to_string();
+    }
+    // FNV-1a 64 — small, stable, no external dep needed.
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in value.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("geo:{:08x}", h as u32)
+}
+
+/// Replace any embedded `user:password@` in a proxy URL with `***@`. Other
+/// parts of the URL (scheme, host, port) pass through so log entries about
+/// proxy config are still diagnosable.
+pub fn mask_proxy_url(raw: &str) -> String {
+    // Find scheme://
+    let Some(scheme_end) = raw.find("://") else {
+        return raw.to_string();
+    };
+    let body_start = scheme_end + 3;
+    let after = &raw[body_start..];
+    let Some(at_pos) = after.find('@') else {
+        return raw.to_string();
+    };
+    format!("{}://***@{}", &raw[..scheme_end], &after[at_pos + 1..])
+}
+
+/// Return a log-safe rendering of an IP. v4 keeps the first two octets;
+/// v6 keeps the first hextet. Non-IP strings pass through unchanged.
+pub fn mask_ip(ip: &str) -> String {
+    if !MASK_IP_LOGS.load(Ordering::Relaxed) {
+        return ip.to_string();
+    }
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            format!("{}.{}.x.x", o[0], o[1])
+        }
+        Ok(IpAddr::V6(v6)) => {
+            let s = v6.segments();
+            format!("{:x}:x:x:x:x:x:x:x", s[0])
+        }
+        Err(_) => ip.to_string(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FailReason {
@@ -134,7 +219,10 @@ pub async fn fetch_public_ip(client: &Client, timeout: Duration) -> IpFetchOutco
     for (url, task) in tasks {
         match task.await {
             Ok(SourceResult::Ok(ip, latency_ms)) => {
-                tracing::info!("Public IP {} fetched from {} in {}ms", ip, url, latency_ms);
+                tracing::info!(
+                    "Public IP {} fetched from {} in {}ms",
+                    mask_ip(&ip), url, latency_ms
+                );
                 return IpFetchOutcome::Ok {
                     ip,
                     source: url,

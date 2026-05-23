@@ -1,7 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo build *)"
+      "Bash(cargo build *)",
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Test-Path *)",
+      "PowerShell($db = \"$env:USERPROFILE\\\\.cc-switch\\\\cc-switch.db\"; & sqlite3.exe $db \"SELECT id, name, app_type, is_current, substr\\(settings_config, 1, 400\\) FROM providers WHERE app_type='claude' AND is_current=1;\" 2>&1)",
+      "mcp__mcpServers__read_text_file",
+      "Bash(findstr /i \"currentProvider\")",
+      "Bash(tasklist)"
     ]
   }
 }

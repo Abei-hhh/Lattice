@@ -8,12 +8,16 @@ windows = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_System_Memory",
     "Win32_System_DataExchange",
+    "Win32_System_Registry",
     "Win32_Security",
 ] }
 
@@ -22,12 +26,21 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+toml_edit = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 dirs = "5"
 sysinfo = "0.33"
 clap = { version = "4", features = ["derive"] }
+
+[build-dependencies]
+# 应用图标流水线：SVG → 多尺寸 RGBA → .ico → 链接进 exe 资源段。
+# 这些只在 build time 用，不增加最终 exe 体积。
+resvg = "0.44"
+tiny-skia = "0.11"
+usvg = "0.44"
+embed-resource = "2.5"
 
 [profile.release]
 opt-level = "s"

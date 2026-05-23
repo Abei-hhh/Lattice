@@ -43,6 +43,49 @@ pub struct AppConfig {
     /// Claude model label refresh interval in seconds (0 = read once at startup only)
     #[serde(default = "default_model_refresh_interval")]
     pub model_refresh_interval: u64,
+
+    /// Mask the last two octets of public IPs in log lines (1.2.x.x). The
+    /// overlay still shows the full IP — this only affects the on-disk log
+    /// file so sharing the log can't leak the user's public IP.
+    #[serde(default = "default_true")]
+    pub mask_ip_in_log: bool,
+    /// Mask country/city/ISP strings in logs as `geo:xxxxxxxx`. The overlay
+    /// still shows the real names — only the log file is affected.
+    #[serde(default = "default_true")]
+    pub mask_geo_in_log: bool,
+    /// Cache Geo lookups to disk (~appdata/Vpn_Monitor/geo_cache.json) so
+    /// returning to a known node shows the city instantly without re-querying.
+    #[serde(default = "default_true")]
+    pub geo_cache_enabled: bool,
+    /// Geo cache TTL in hours. After this, the entry is re-fetched.
+    #[serde(default = "default_geo_cache_ttl_hours")]
+    pub geo_cache_ttl_hours: u64,
+    /// Maximum number of entries kept in the geo cache (LRU eviction).
+    #[serde(default = "default_geo_cache_max_entries")]
+    pub geo_cache_max_entries: usize,
+    /// Idle threshold in seconds. When `GetLastInputInfo` reports the user has
+    /// been idle longer than this, IP poll and monitor intervals are multiplied
+    /// by `idle_multiplier` to reduce battery / CPU drain.
+    /// 0 disables idle-aware scaling.
+    #[serde(default = "default_idle_threshold")]
+    pub idle_threshold_seconds: u64,
+    #[serde(default = "default_idle_multiplier")]
+    pub idle_multiplier: u64,
+    /// Cross-check geo across HTTPS (ipwho.is) and HTTP (ip-api.com) providers.
+    /// When both succeed and report different countries, log a warning — this
+    /// catches MITM-spoofed HTTP responses. The HTTPS result is always preferred
+    /// when both succeed.
+    #[serde(default = "default_true")]
+    pub geo_cross_check: bool,
+
+    /// 主题模式："system" / "light" / "dark"。system = 跟随 OS 个性化设置。
+    #[serde(default = "default_theme")]
+    pub theme: String,
+
+    /// 浮窗左上 tag 显示哪个 cc-switch 工具的当前模型。
+    /// 候选：claude / codex / gemini / opencode / openclaw / hermes。
+    #[serde(default = "default_cc_switch_provider")]
+    pub active_cc_switch_provider: String,
 }
 
 fn default_check_interval() -> u64 { 10 }
@@ -54,6 +97,12 @@ fn default_max_retries() -> u32 { 3 }
 fn default_monitor_interval() -> u64 { 2 }
 fn default_proxy_interval() -> u64 { 30 }
 fn default_model_refresh_interval() -> u64 { 5 }
+fn default_geo_cache_ttl_hours() -> u64 { 24 * 7 }
+fn default_geo_cache_max_entries() -> usize { 1000 }
+fn default_idle_threshold() -> u64 { 15 * 60 }
+fn default_idle_multiplier() -> u64 { 5 }
+fn default_theme() -> String { "system".to_string() }
+fn default_cc_switch_provider() -> String { "claude".to_string() }
 fn default_hotkey_toggle() -> String { "ctrl+alt+h".to_string() }
 fn default_hotkey_lookup() -> String { "ctrl+alt+i".to_string() }
 fn default_hotkey_quit() -> String { "ctrl+alt+shift+k".to_string() }
@@ -77,6 +126,16 @@ impl Default for AppConfig {
             monitor_interval: default_monitor_interval(),
             proxy_check_interval: default_proxy_interval(),
             model_refresh_interval: default_model_refresh_interval(),
+            mask_ip_in_log: true,
+            mask_geo_in_log: true,
+            geo_cache_enabled: true,
+            geo_cache_ttl_hours: default_geo_cache_ttl_hours(),
+            geo_cache_max_entries: default_geo_cache_max_entries(),
+            idle_threshold_seconds: default_idle_threshold(),
+            idle_multiplier: default_idle_multiplier(),
+            geo_cross_check: true,
+            theme: default_theme(),
+            active_cc_switch_provider: default_cc_switch_provider(),
         }
     }
 }
@@ -111,6 +170,18 @@ enable_log = false          # 是否启用日志记录
 monitor_interval = 2        # 系统监控刷新间隔（秒）：CPU/内存/网速
 proxy_check_interval = 30   # 代理检测间隔（秒）：注册表+PAC+端口+进程
 model_refresh_interval = 5  # Claude 模型标签刷新间隔（秒），0=仅启动时读取一次
+
+mask_ip_in_log = true             # 日志中将公网 IP 掩码为 1.2.x.x（浮窗不受影响）
+mask_geo_in_log = true            # 日志中将归属地脱敏为哈希（浮窗不受影响）
+geo_cache_enabled = true          # 启用归属地磁盘缓存
+geo_cache_ttl_hours = 168         # 缓存有效期（小时），默认 7 天
+geo_cache_max_entries = 1000      # LRU 上限，超过淘汰最老条目
+idle_threshold_seconds = 900      # 用户空闲多少秒后降频；0 关闭
+idle_multiplier = 5               # 空闲时所有轮询间隔的倍数
+geo_cross_check = true            # 跨源比对国别，HTTPS 优先 ipwho.is
+
+theme = "system"                            # 主题：system / light / dark
+active_cc_switch_provider = "claude"        # 浮窗左上 tag 读哪个 cc-switch 工具
 "#;
 
 pub fn load_config(path: Option<PathBuf>) -> AppConfig {
