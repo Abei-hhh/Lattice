@@ -44,10 +44,17 @@ pub unsafe fn draw_button(dis: &DRAWITEMSTRUCT, theme: &Theme, is_primary: bool)
     };
     let fg = if disabled { theme.fg_dim } else { fg };
 
-    // 整体先擦背景（防止上次绘制残留），再 RoundRect 画圆角主体
-    let parent_brush = CreateSolidBrush(theme.bg);
+    // 整体先擦背景（防止上次绘制残留），再 RoundRect 画圆角主体。
+    //
+    // 关键点：这里擦的是按钮"圆角之外"的方形区域，必须用按钮父窗口的
+    // 实际背景色 —— 否则圆角外会露出和父窗口不一致的方块（之前用
+    // theme.bg 在设置对话框里就是这个 bug：对话框背景是 COLOR_3DFACE，
+    // 按钮圆角外却是深色 theme.bg）。
+    //
+    // GetSysColorBrush 返回 OS 持有的画刷，**不需要也不能 DeleteObject**。
+    let parent_brush =
+        GetSysColorBrush(windows::Win32::Graphics::Gdi::COLOR_3DFACE);
     let _ = FillRect(hdc, &rect, parent_brush);
-    let _ = DeleteObject(parent_brush.into());
 
     let brush = CreateSolidBrush(bg);
     let pen_color = if focused { theme.accent_green } else { bg };
@@ -76,6 +83,23 @@ pub unsafe fn draw_button(dis: &DRAWITEMSTRUCT, theme: &Theme, is_primary: bool)
 
     let _ = SetBkMode(hdc, BACKGROUND_MODE(1));
     let _ = SetTextColor(hdc, fg);
+
+    // 关键：owner-draw 拿到的 hDC 默认字体未必是按钮控件自己设的 (HFONT
+    // 通过 WM_SETFONT 设)。OS 给的是 SYSTEM_FONT (老式 Fixedsys 位图)，
+    // 文字粗糙。显式 WM_GETFONT 把按钮当前字体 select 上去，再画。
+    let hfont_raw = SendMessageW(
+        dis.hwndItem,
+        WM_GETFONT,
+        Some(WPARAM(0)),
+        Some(LPARAM(0)),
+    )
+    .0;
+    let old_font = if hfont_raw != 0 {
+        Some(SelectObject(hdc, HGDIOBJ(hfont_raw as *mut _)))
+    } else {
+        None
+    };
+
     let mut draw_rect = rect;
     let _ = DrawTextW(
         hdc,
@@ -83,6 +107,10 @@ pub unsafe fn draw_button(dis: &DRAWITEMSTRUCT, theme: &Theme, is_primary: bool)
         &mut draw_rect,
         DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
     );
+
+    if let Some(old) = old_font {
+        let _ = SelectObject(hdc, old);
+    }
 }
 
 fn darken(c: COLORREF, factor: f32) -> COLORREF {

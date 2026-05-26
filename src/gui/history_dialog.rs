@@ -25,8 +25,6 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::network::geo_cache::{GeoCache, HistoryEntry};
 
-use super::lookup_dialog::LookupDialog;
-
 // ── 控件 ID ──────────────────────────────────────────────────────
 const ID_SEARCH_EDIT: usize = 201;
 const ID_REFRESH_BTN: usize = 202;
@@ -70,11 +68,10 @@ pub struct HistoryDialog {
     /// 当前显示的（已过滤）条目。每行的网段 key 用于"删除"右键操作。
     visible_entries: Vec<HistoryEntry>,
     geo_cache: Option<Arc<GeoCache>>,
-    client: reqwest::Client,
 }
 
 impl HistoryDialog {
-    pub fn new(client: reqwest::Client, geo_cache: Option<Arc<GeoCache>>) -> Self {
+    pub fn new(geo_cache: Option<Arc<GeoCache>>) -> Self {
         let all = geo_cache
             .as_ref()
             .map(|c| c.history())
@@ -86,7 +83,6 @@ impl HistoryDialog {
             visible_entries: all.clone(),
             all_entries: all,
             geo_cache,
-            client,
         }
     }
 
@@ -475,25 +471,6 @@ unsafe fn handle_notify(hwnd: HWND, lparam: LPARAM) -> LRESULT {
         return LRESULT(0);
     }
     match nmhdr.code {
-        NM_DBLCLK => {
-            // 双击 = 重查 —— 同步打开 lookup 对话框并预填 IP
-            if let Some(entry) = selected_entry(&*dlg_ptr) {
-                let client = (*dlg_ptr).client.clone();
-                let cache = (*dlg_ptr).geo_cache.clone();
-                let ip = entry.last_ip.clone();
-                let parent_raw = hwnd.0 as usize;
-                std::thread::Builder::new()
-                    .name("vpn-monitor-history-relookup".into())
-                    .spawn(move || {
-                        let parent = HWND(parent_raw as *mut _);
-                        let mut dlg = LookupDialog::with_initial_ip(
-                            client, cache, Some(ip),
-                        );
-                        dlg.show(parent);
-                    })
-                    .ok();
-            }
-        }
         NM_RCLICK => {
             // 右键 = 上下文菜单
             if selected_entry(&*dlg_ptr).is_some() {

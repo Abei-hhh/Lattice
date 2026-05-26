@@ -32,6 +32,18 @@ fn cc_switch_settings_path() -> Option<PathBuf> {
     Some(home.join(".cc-switch").join("settings.json"))
 }
 
+fn cc_switch_db_path() -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+    Some(home.join(".cc-switch").join("cc-switch.db"))
+}
+
+/// cc-switch 是否"安装过"——靠数据库文件存在判定。
+/// 进程是否在跑由 binary 端（用 sysinfo）补，core 不依赖 OS-specific 进程枚举。
+/// 完整可用性 = files_present AND process_running，写入 RuntimeFlags.cc_switch_available。
+pub fn files_present() -> bool {
+    cc_switch_db_path().map(|p| p.exists()).unwrap_or(false)
+}
+
 fn claude_settings_path() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
     Some(home.join(".claude").join("settings.json"))

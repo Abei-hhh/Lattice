@@ -23,6 +23,11 @@ pub struct RuntimeFlags {
     pub overlay_visible: AtomicBool,
     /// 鼠标穿透 = WS_EX_TRANSPARENT。运行时切换通过 SetWindowLongPtr + SWP_FRAMECHANGED。
     pub click_through: AtomicBool,
+    /// cc-switch 当前是否可用（SQLite 文件存在 AND cc-switch.exe 进程在跑）。
+    /// 由后台 task 周期更新。所有 AI 相关 UI（浮窗 Claude tag / row2 usage、
+    /// 托盘 row2 usage 项 / 用量明细菜单、设置对话框 cc-switch 源 tab）
+    /// 在 false 时全部隐藏，避免用户看到陈旧或空数据。
+    pub cc_switch_available: AtomicBool,
 
     /// 主题模式："system" / "light" / "dark"。RwLock 因为是字符串。
     /// 设置对话框切换后下一次 WM_PAINT / WM_SETTINGCHANGE 读到新值。
@@ -31,10 +36,6 @@ pub struct RuntimeFlags {
     /// 浮窗左上 tag 显示哪个 cc-switch 工具的当前模型。
     /// 切换后下一次 model refresh task tick 即生效。
     pub active_cc_switch_provider: Arc<RwLock<String>>,
-
-    /// 浮窗形态："simple"（双行）或 "detailed"（双行 + 右侧流量曲线）。
-    /// 托盘菜单切换 → InvalidateRect 重绘即可生效，无需重建窗口。
-    pub overlay_form: Arc<RwLock<String>>,
 
     /// 第二行内容模式："system"（↑↓+CPU+内存）或 "usage"（AI 用量）。
     pub row2_mode: Arc<RwLock<String>>,
@@ -48,11 +49,12 @@ impl RuntimeFlags {
             overlay_locked: AtomicBool::new(persisted_locked),
             overlay_visible: AtomicBool::new(true),
             click_through: AtomicBool::new(cfg.click_through),
+            // 启动时默认 false；后台 detect task 第一次 tick 写入真实状态
+            cc_switch_available: AtomicBool::new(false),
             theme_mode: Arc::new(RwLock::new(cfg.theme.clone())),
             active_cc_switch_provider: Arc::new(RwLock::new(
                 cfg.active_cc_switch_provider.clone(),
             )),
-            overlay_form: Arc::new(RwLock::new(cfg.overlay_form.clone())),
             row2_mode: Arc::new(RwLock::new(cfg.row2_mode.clone())),
         })
     }

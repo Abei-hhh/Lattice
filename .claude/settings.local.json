@@ -13,7 +13,13 @@
       "Bash(git push *)",
       "Bash(FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter \"sed '/^Co-Authored-By:.*Claude/d' | awk 'BEGIN{e=0} /./{for\\(i=0;i<e;i++\\)print \\\\\"\\\\\"; e=0; print; next} {e++}'\" 83cf873~1..HEAD)",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(xargs wc -l)",
+      "Read(//c/Users/PC/.cc-switch/**)",
+      "Bash(netstat -ano)",
+      "WebFetch(domain:deepwiki.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   }
 }

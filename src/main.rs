@@ -16,7 +16,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 mod gui;
 mod monitor;
-mod tcp_table;
 
 // 把 core crate 的子模块 re-export 成本地 `crate::xxx`，让 gui/* 等子模块原有
 // `crate::config::...` / `crate::network::...` 等路径不用动。
@@ -134,6 +133,22 @@ fn try_init_logging(enable_log: bool) {
 }
 
 fn main() {
+    // ── DPI awareness ─────────────────────────────────────────────
+    // Per-Monitor V2 让我们自己处理每个显示器的 DPI 缩放（接 WM_DPICHANGED），
+    // 而不是被 OS bitmap-stretch（默认行为）。后者在 125%/150%/175% 缩放下
+    // 会让文字 / 控件边缘出现明显毛刺。必须在创建任何 HWND 之前调用。
+    // 失败可能是老系统（Win10 1607 之前），就退化回 system-aware；再不行
+    // 干脆静默——bitmap stretch 不是致命错误。
+    unsafe {
+        use windows::Win32::UI::HiDpi::{
+            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            DPI_AWARENESS_CONTEXT_SYSTEM_AWARE,
+        };
+        if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_err() {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE);
+        }
+    }
+
     // ── Single-instance guard ──────────────────────────────────────
     // Capture GetLastError() *immediately* after CreateMutexW in the same
     // unsafe block so no intervening Rust code can clobber the thread-local
@@ -232,10 +247,10 @@ fn main() {
         opacity: config.opacity,
         claude_model,
         theme: initial_theme,
-        overlay_form: config.overlay_form.clone(),
         row2_mode: config.row2_mode.clone(),
         usage_5h_limit_requests: config.usage_5h_limit_requests,
         usage_week_limit_requests: config.usage_week_limit_requests,
+        runtime_flags: Some(runtime_flags.clone()),
         ..Default::default()
     }));
 
@@ -529,24 +544,6 @@ fn main() {
         })
         .ok();
 
-    // 流量分流可视化 task：每 10s 扫一次活跃 TCP 远端 IP，按 geo_cache 命中
-    // 国家聚合写到 state.traffic_by_country。仅当浮窗 form == detailed 才有意义，
-    // 但任务始终在跑（开销极小，~1ms 一次 GetExtendedTcpTable + 哈希聚合）
-    {
-        let traffic_state = state.clone();
-        let traffic_cache = geo_cache.clone();
-        std::thread::Builder::new()
-            .name("vpn-monitor-tcp-table".into())
-            .spawn(move || loop {
-                let dist = tcp_table::summarize_by_country(traffic_cache.as_ref(), 5);
-                if let Ok(mut s) = traffic_state.lock() {
-                    s.traffic_by_country = dist;
-                }
-                std::thread::sleep(Duration::from_secs(10));
-            })
-            .ok();
-    }
-
     // 代理 RPC 探测 task（Clash / Mihomo / sing-box 当前节点名）
     // 间隔 5s 足够 —— 切节点不是常态操作。client_clone 与 IP 轮询共享同一个
     // reqwest::Client，连接池复用。
@@ -597,8 +594,46 @@ fn main() {
         });
     }
 
-    // cc-switch SQLite 用量刷新 task —— 每 N 秒重读 5h/周用量并写到 state
+    // cc-switch 可用性检测 task：每 15s 探测 SQLite 文件存在 + cc-switch.exe
+    // 进程在跑。结果写入 RuntimeFlags.cc_switch_available，所有 AI 相关 UI
+    // 都读这个 atomic 决定隐藏/显示。
+    {
+        let flags = runtime_flags.clone();
+        std::thread::Builder::new()
+            .name("vpn-monitor-ccswitch-probe".into())
+            .spawn(move || {
+                use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+                let mut sys = System::new();
+                loop {
+                    let files_ok = vpn_monitor_core::cc_switch::files_present();
+                    let proc_ok = if files_ok {
+                        // 只在文件存在时才付进程枚举的代价。
+                        sys.refresh_processes_specifics(
+                            ProcessesToUpdate::All,
+                            true,
+                            ProcessRefreshKind::nothing(),
+                        );
+                        sys.processes().values().any(|p| {
+                            let name = p.name().to_string_lossy().to_ascii_lowercase();
+                            name == "cc-switch.exe" || name == "cc-switch"
+                        })
+                    } else {
+                        false
+                    };
+                    flags
+                        .cc_switch_available
+                        .store(files_ok && proc_ok, std::sync::atomic::Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_secs(15));
+                }
+            })
+            .ok();
+    }
+
+    // cc-switch SQLite 用量刷新 task —— 每 N 秒重读 5h/周用量并写到 state。
+    // 传入用户配置的配额上限给 ETA 算法使用。
     let usage_refresh_interval = config.usage_refresh_interval;
+    let limit_5h = config.usage_5h_limit_requests;
+    let limit_week = config.usage_week_limit_requests;
     if usage_refresh_interval > 0 {
         let usage_state = state.clone();
         let usage_source = runtime_flags.active_cc_switch_provider.clone();
@@ -608,7 +643,9 @@ fn main() {
                     .read()
                     .map(|g| g.clone())
                     .unwrap_or_else(|p| p.into_inner().clone());
-                let usage = vpn_monitor_core::usage::read_usage_stats(&source);
+                let usage = vpn_monitor_core::usage::read_usage_stats_with_limits(
+                    &source, limit_5h, limit_week,
+                );
                 if let Ok(mut s) = usage_state.lock() {
                     s.usage = usage;
                 }
@@ -648,7 +685,6 @@ fn main() {
         &config,
         state,
         update_rx,
-        client,
         ip_check_notify,
         geo_cache,
         runtime_flags,

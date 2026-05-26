@@ -20,8 +20,6 @@ pub struct AppConfig {
 
     #[serde(default = "default_hotkey_toggle")]
     pub hotkey_toggle: String,
-    #[serde(default = "default_hotkey_lookup")]
-    pub hotkey_lookup: String,
     #[serde(default = "default_hotkey_quit")]
     pub hotkey_quit: String,
 
@@ -87,10 +85,6 @@ pub struct AppConfig {
     #[serde(default = "default_cc_switch_provider")]
     pub active_cc_switch_provider: String,
 
-    /// 浮窗形态："simple"（双行）或 "detailed"（双行 + 右侧流量曲线）。
-    #[serde(default = "default_overlay_form")]
-    pub overlay_form: String,
-
     /// 第二行显示内容："system"（↑↓ + CPU + 内存）或 "usage"
     /// （主用模型 + 5h/本周 token + cost）。
     #[serde(default = "default_row2_mode")]
@@ -118,7 +112,7 @@ fn default_check_interval() -> u64 { 10 }
 fn default_true() -> bool { true }
 fn default_opacity() -> f32 { 0.85 }
 fn default_position() -> String { "top-center".to_string() }
-fn default_timeout() -> u64 { 5 }
+fn default_timeout() -> u64 { 60 }
 fn default_max_retries() -> u32 { 3 }
 fn default_monitor_interval() -> u64 { 2 }
 fn default_proxy_interval() -> u64 { 30 }
@@ -129,7 +123,6 @@ fn default_idle_threshold() -> u64 { 15 * 60 }
 fn default_idle_multiplier() -> u64 { 5 }
 fn default_theme() -> String { "system".to_string() }
 fn default_cc_switch_provider() -> String { "claude".to_string() }
-fn default_overlay_form() -> String { "simple".to_string() }
 fn default_row2_mode() -> String { "system".to_string() }
 fn default_usage_refresh_interval() -> u64 { 30 }
 // 默认按 Anthropic Pro：5h 50 条用户消息 / 7d 约 1000 条。
@@ -137,7 +130,6 @@ fn default_usage_refresh_interval() -> u64 { 30 }
 fn default_usage_5h_limit_requests() -> u64 { 50 }
 fn default_usage_week_limit_requests() -> u64 { 1000 }
 fn default_hotkey_toggle() -> String { "ctrl+alt+h".to_string() }
-fn default_hotkey_lookup() -> String { "ctrl+alt+i".to_string() }
 fn default_hotkey_quit() -> String { "ctrl+alt+shift+k".to_string() }
 
 impl Default for AppConfig {
@@ -150,7 +142,6 @@ impl Default for AppConfig {
             position: default_position(),
             show_isp: true,
             hotkey_toggle: default_hotkey_toggle(),
-            hotkey_lookup: default_hotkey_lookup(),
             hotkey_quit: default_hotkey_quit(),
             timeout: default_timeout(),
             max_retries: default_max_retries(),
@@ -169,7 +160,6 @@ impl Default for AppConfig {
             geo_cross_check: true,
             theme: default_theme(),
             active_cc_switch_provider: default_cc_switch_provider(),
-            overlay_form: default_overlay_form(),
             row2_mode: default_row2_mode(),
             usage_refresh_interval: default_usage_refresh_interval(),
             usage_5h_limit_requests: default_usage_5h_limit_requests(),
@@ -197,10 +187,9 @@ position = "top-center"     # 窗口位置（预留）
 show_isp = true             # 是否显示 ISP（查询窗口生效）
 
 hotkey_toggle = "ctrl+alt+h"         # 切换显隐
-hotkey_lookup = "ctrl+alt+i"         # 打开查询窗口
 hotkey_quit = "ctrl+alt+shift+k"     # 退出程序
 
-timeout = 5                 # 请求超时（秒）
+timeout = 60                # 请求超时（秒）
 max_retries = 3             # 最大重试次数
 enable_log = false          # 是否启用日志记录
 # proxy = "socks5://127.0.0.1:1080"  # 可选代理
@@ -221,7 +210,6 @@ geo_cross_check = true            # 跨源比对国别，HTTPS 优先 ipwho.is
 theme = "system"                            # 主题：system / light / dark
 active_cc_switch_provider = "claude"        # 浮窗左上 tag 读哪个 cc-switch 工具
 
-overlay_form = "simple"                     # 浮窗形态：simple（双行）/ detailed（双行 + 流量曲线）
 row2_mode = "system"                        # 第二行：system（↑↓+CPU+内存）/ usage（AI 用量）
 usage_refresh_interval = 30                 # 读 cc-switch SQLite 用量的间隔（秒），0 关闭
 usage_5h_limit_requests = 50                # 5h 滚动窗口**用户消息数**上限（Anthropic Pro ≈ 50 / Max ≈ 250）

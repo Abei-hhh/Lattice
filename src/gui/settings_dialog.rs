@@ -54,7 +54,6 @@ const ID_MASK_GEO: usize = 3002;
 const ID_CROSS_CHECK: usize = 3003;
 // 热键 tab (4000s)
 const ID_HOTKEY_TOGGLE: usize = 4001;
-const ID_HOTKEY_LOOKUP: usize = 4002;
 const ID_HOTKEY_QUIT: usize = 4003;
 // 高级 tab (5000s)
 const ID_GEO_CACHE_ENABLED: usize = 5001;
@@ -88,7 +87,7 @@ const TAB_IDS: [&[usize]; TAB_COUNT] = [
         ID_PROXY,
     ],
     &[ID_MASK_IP, ID_MASK_GEO, ID_CROSS_CHECK],
-    &[ID_HOTKEY_TOGGLE, ID_HOTKEY_LOOKUP, ID_HOTKEY_QUIT],
+    &[ID_HOTKEY_TOGGLE, ID_HOTKEY_QUIT],
     &[
         ID_GEO_CACHE_ENABLED,
         ID_GEO_CACHE_TTL,
@@ -119,6 +118,11 @@ pub struct SettingsDialog {
     /// 启动时读到的配置 —— 控件初值来自这里，应用时用于 diff 判断
     /// "数值字段是否变了从而需要弹重启提示"。
     initial: AppConfig,
+    /// 整个对话框统一使用的 UI 字体。Win32 默认控件用 SYSTEM_FONT（Win95
+    /// 时代的 Fixedsys 12pt 位图字体），文字粗糙、字距异常。这里创建一份
+    /// 系统消息字体（通常是 Segoe UI 9pt）+ ClearType 抗锯齿，给所有子
+    /// 控件 WM_SETFONT 应用。dialog 销毁时 DeleteObject。
+    ui_font: HFONT,
 }
 
 impl SettingsDialog {
@@ -132,6 +136,7 @@ impl SettingsDialog {
             runtime_flags,
             overlay_hwnd,
             initial,
+            ui_font: HFONT::default(),
         }
     }
 
@@ -235,6 +240,11 @@ unsafe extern "system" fn dialog_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
+            // 释放 UI 字体 GDI 资源
+            let dlg_ptr = dialog_ptr(hwnd);
+            if !dlg_ptr.is_null() && !(*dlg_ptr).ui_font.is_invalid() {
+                let _ = DeleteObject((*dlg_ptr).ui_font.into());
+            }
             PostQuitMessage(0);
             LRESULT(0)
         }
@@ -285,7 +295,7 @@ unsafe fn create_all_controls(hwnd: HWND) -> LRESULT {
     add_label(hwnd, hinst, label_id(ID_OPACITY), "不透明度 (0.0 - 1.0):", 30, 90);
     add_edit(hwnd, hinst, ID_OPACITY, 220, 88, 80, &format!("{:.2}", cfg.opacity));
 
-    add_check(hwnd, hinst, ID_CLICK_THROUGH, "鼠标穿透（不响应任何点击）", 30, 130, cfg.click_through);
+    add_check(hwnd, hinst, ID_CLICK_THROUGH, "鼠标穿透 ⚠ 开启后无法拖动 (会自动锁定位置；想再拖动请在托盘解锁)", 30, 130, cfg.click_through);
     add_check(hwnd, hinst, ID_ENABLE_LOG, "启用日志（写到 %APPDATA%\\Vpn_Monitor）", 30, 160, cfg.enable_log);
 
     // 主题 radio 组 —— 与 cc-switch 那组用不同 WS_GROUP 分隔
@@ -330,11 +340,8 @@ unsafe fn create_all_controls(hwnd: HWND) -> LRESULT {
     add_label(hwnd, hinst, label_id(ID_HOTKEY_TOGGLE), "显隐浮窗:", 30, 50);
     add_edit(hwnd, hinst, ID_HOTKEY_TOGGLE, 220, 48, 200, &cfg.hotkey_toggle);
 
-    add_label(hwnd, hinst, label_id(ID_HOTKEY_LOOKUP), "打开 IP 查询:", 30, 80);
-    add_edit(hwnd, hinst, ID_HOTKEY_LOOKUP, 220, 78, 200, &cfg.hotkey_lookup);
-
-    add_label(hwnd, hinst, label_id(ID_HOTKEY_QUIT), "退出程序:", 30, 110);
-    add_edit(hwnd, hinst, ID_HOTKEY_QUIT, 220, 108, 200, &cfg.hotkey_quit);
+    add_label(hwnd, hinst, label_id(ID_HOTKEY_QUIT), "退出程序:", 30, 80);
+    add_edit(hwnd, hinst, ID_HOTKEY_QUIT, 220, 78, 200, &cfg.hotkey_quit);
 
     // ── Tab 4: 高级 ───
     add_check(hwnd, hinst, ID_GEO_CACHE_ENABLED, "启用归属地磁盘缓存", 30, 50, cfg.geo_cache_enabled);
@@ -352,27 +359,38 @@ unsafe fn create_all_controls(hwnd: HWND) -> LRESULT {
     add_edit_num(hwnd, hinst, ID_IDLE_MULTIPLIER, 220, 168, &cfg.idle_multiplier.to_string());
 
     // cc-switch 源 radio 组（"显示哪个 CLI 工具的当前模型"）。
-    // 用 BS_AUTORADIOBUTTON + WS_GROUP 起首，OS 自动做互斥；只读 KNOWN_TOOLS。
-    add_label(hwnd, hinst, label_id(ID_CCSWITCH_RADIO_BASE), "浮窗左上显示哪个 cc-switch 源:", 30, 205);
-    let known = crate::cc_switch::KNOWN_TOOLS;
-    let detected = crate::cc_switch::detect_available_sources();
-    for (i, &tool) in known.iter().enumerate() {
-        let id = ID_CCSWITCH_RADIO_BASE + i;
-        let row = (i / 3) as i32;
-        let col = (i % 3) as i32;
-        let x = 30 + col * 130;
-        let y = 228 + row * 24;
-        let is_first = i == 0;
-        let label = if detected.iter().any(|d| d == tool) {
-            tool.to_string()
-        } else {
-            // 未检测到 cc-switch 该工具的 provider 配置 —— 灰色提示但仍可选
-            format!("{} (未配置)", tool)
-        };
-        add_radio(hwnd, hinst, id, &label, x, y, is_first);
-        if tool == cfg.active_cc_switch_provider {
-            if let Ok(c) = GetDlgItem(Some(hwnd), id as i32) {
-                SendMessageW(c, BM_SETCHECK, Some(WPARAM(BST_CHECKED.0 as usize)), Some(LPARAM(0)));
+    // cc-switch 当前不可用时整个区块换成提示文案，不创建 radio。
+    let ai_enabled = (&(*dlg_ptr).runtime_flags)
+        .cc_switch_available
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if !ai_enabled {
+        add_label(
+            hwnd, hinst, label_id(ID_CCSWITCH_RADIO_BASE),
+            "⚠ 未检测到 cc-switch（请启动后重开本对话框）",
+            30, 205,
+        );
+    } else {
+        add_label(hwnd, hinst, label_id(ID_CCSWITCH_RADIO_BASE), "浮窗左上显示哪个 cc-switch 源:", 30, 205);
+        let known = crate::cc_switch::KNOWN_TOOLS;
+        let detected = crate::cc_switch::detect_available_sources();
+        for (i, &tool) in known.iter().enumerate() {
+            let id = ID_CCSWITCH_RADIO_BASE + i;
+            let row = (i / 3) as i32;
+            let col = (i % 3) as i32;
+            let x = 30 + col * 130;
+            let y = 228 + row * 24;
+            let is_first = i == 0;
+            let label = if detected.iter().any(|d| d == tool) {
+                tool.to_string()
+            } else {
+                // 未检测到 cc-switch 该工具的 provider 配置 —— 灰色提示但仍可选
+                format!("{} (未配置)", tool)
+            };
+            add_radio(hwnd, hinst, id, &label, x, y, is_first);
+            if tool == cfg.active_cc_switch_provider {
+                if let Ok(c) = GetDlgItem(Some(hwnd), id as i32) {
+                    SendMessageW(c, BM_SETCHECK, Some(WPARAM(BST_CHECKED.0 as usize)), Some(LPARAM(0)));
+                }
             }
         }
     }
@@ -385,9 +403,59 @@ unsafe fn create_all_controls(hwnd: HWND) -> LRESULT {
     (*dlg_ptr).hwnd = hwnd;
     (*dlg_ptr).tab_hwnd = tab;
 
+    // 给所有子控件统一应用 UI 字体 —— 否则文字是 Win95 时代的 Fixedsys 位图，
+    // 在任何 DPI 下都模糊难看。EnumChildWindows 比逐个 add_* helper 改签名
+    // 简洁，新增控件也自动覆盖。
+    let font = create_ui_font();
+    (*dlg_ptr).ui_font = font;
+    let _ = EnumChildWindows(Some(hwnd), Some(set_font_cb), LPARAM(font.0 as isize));
+
     // 初始只显示 tab 0 的控件
     switch_tab(hwnd, 0);
     LRESULT(0)
+}
+
+/// 创建系统默认 UI 字体。SPI_GETNONCLIENTMETRICS 返回 NONCLIENTMETRICS，
+/// 其 `lfMessageFont` 就是当前系统消息字体 —— Win10/11 上是 Segoe UI 9pt，
+/// 老系统可能是 Tahoma。把 quality 改成 CLEARTYPE 拿到亚像素抗锯齿。
+unsafe fn create_ui_font() -> HFONT {
+    let mut ncm = NONCLIENTMETRICSW {
+        cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
+        ..Default::default()
+    };
+    let ok = windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
+        SPI_GETNONCLIENTMETRICS,
+        ncm.cbSize,
+        Some(&mut ncm as *mut _ as *mut _),
+        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+    )
+    .is_ok();
+    let mut lf = if ok {
+        ncm.lfMessageFont
+    } else {
+        // Fallback：Segoe UI 9pt @ 96DPI。lfHeight 负号表示"字符高度"
+        // 而非"单元格高度"，是 Win32 字体的常规写法。
+        let mut lf = LOGFONTW::default();
+        lf.lfHeight = -12;
+        lf.lfWeight = 400;
+        lf.lfCharSet = DEFAULT_CHARSET;
+        for (i, ch) in "Segoe UI".encode_utf16().enumerate().take(31) {
+            lf.lfFaceName[i] = ch;
+        }
+        lf
+    };
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    CreateFontIndirectW(&lf)
+}
+
+unsafe extern "system" fn set_font_cb(child: HWND, lparam: LPARAM) -> BOOL {
+    SendMessageW(
+        child,
+        WM_SETFONT,
+        Some(WPARAM(lparam.0 as usize)),
+        Some(LPARAM(1)), // redraw = TRUE
+    );
+    TRUE
 }
 
 unsafe fn add_tab(tab: HWND, idx: i32, label: &str) {
@@ -643,7 +711,6 @@ unsafe fn save_and_apply(hwnd: HWND) -> Result<(), String> {
     let new_cross_check = get_check(hwnd, ID_CROSS_CHECK);
 
     let new_hotkey_toggle = get_edit_string(hwnd, ID_HOTKEY_TOGGLE);
-    let new_hotkey_lookup = get_edit_string(hwnd, ID_HOTKEY_LOOKUP);
     let new_hotkey_quit = get_edit_string(hwnd, ID_HOTKEY_QUIT);
 
     let new_geo_cache_enabled = get_check(hwnd, ID_GEO_CACHE_ENABLED);
@@ -699,7 +766,6 @@ unsafe fn save_and_apply(hwnd: HWND) -> Result<(), String> {
     doc["geo_cross_check"] = value(new_cross_check);
 
     doc["hotkey_toggle"] = value(new_hotkey_toggle.clone());
-    doc["hotkey_lookup"] = value(new_hotkey_lookup.clone());
     doc["hotkey_quit"] = value(new_hotkey_quit.clone());
 
     doc["geo_cache_enabled"] = value(new_geo_cache_enabled);
@@ -738,6 +804,21 @@ unsafe fn save_and_apply(hwnd: HWND) -> Result<(), String> {
             .click_through
             .store(new_click_through, std::sync::atomic::Ordering::Relaxed);
         super::window::set_overlay_click_through(dlg.overlay_hwnd, new_click_through);
+        // 联动：开启穿透 → 自动锁定位置（与托盘菜单口径一致）。
+        // 此处只能影响"开启"方向；关闭穿透时不动 locked。
+        // 用户想从锁定切换回可拖动，应去托盘点"锁定位置"，那一边的逻辑
+        // 又会把这里设的 click_through 关掉，循环闭合。
+        if new_click_through {
+            dlg.runtime_flags
+                .overlay_locked
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            unsafe {
+                super::window::persist_overlay_state(
+                    dlg.overlay_hwnd,
+                    &dlg.runtime_flags,
+                );
+            }
+        }
     }
 
     // opacity 立即应用
@@ -774,7 +855,6 @@ unsafe fn save_and_apply(hwnd: HWND) -> Result<(), String> {
         || new_model_refresh_interval != cfg.model_refresh_interval
         || new_proxy_opt != cfg.proxy
         || new_hotkey_toggle != cfg.hotkey_toggle
-        || new_hotkey_lookup != cfg.hotkey_lookup
         || new_hotkey_quit != cfg.hotkey_quit
         || new_geo_cache_ttl != cfg.geo_cache_ttl_hours
         || new_geo_cache_max != cfg.geo_cache_max_entries

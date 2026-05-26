@@ -49,8 +49,7 @@ Vpn_Monitor/
 | `hotkey.rs` | RegisterHotKey / UnregisterHotKey（三个全局热键） |
 | `overlay_state.rs` | 浮窗位置 + 锁定状态持久化到 overlay_state.json（独立于 config.toml） |
 | `tray.rs` | Shell_NotifyIconW 托盘图标 + 两层右键菜单 + ShellExecuteW 辅助 |
-| `lookup_dialog.rs` | IP 查询窗口；支持 initial_ip 预填（历史窗口"双击重查"用）；先查 GeoCache 命中再打 API |
-| `history_dialog.rs` | IP 历史时间线 ListView 窗口：搜索 / 双击重查 / 右键复制·删除 / CSV 导出 |
+| `history_dialog.rs` | IP 历史时间线 ListView 窗口：搜索 / 右键复制·删除 / CSV 导出（已移除"双击重查"，因 lookup_dialog 已删） |
 | `settings_dialog.rs` | 高级设置 5-Tab 对话框：全字段编辑，toml_edit 保留注释，分立即生效/重启生效 |
 | `usage_dialog.rs` | AI 用量明细窗口：4 时段 radio + ListView（工具/Provider/模型/请求数/Tok/费用/延迟） |
 
@@ -60,17 +59,58 @@ Vpn_Monitor/
   `main.rs` 顶部一行 `pub use vpn_monitor_core::{cc_switch, config, network, runtime};` 做了 alias。
 - 若新写代码，推荐直接 `use vpn_monitor_core::config::AppConfig;` 表达更清楚的跨 crate 依赖关系。
 
+## ⚠️ AI 用量计算 — 已搁置 (2026-05-26)
+
+**当前状态**：浮窗 row2 "usage" 模式仍在跑，但**实现路径方向错了**，已停止迭代。
+
+**误入歧途的实际**：我们当前的实现是
+1. 读 `~/.cc-switch/cc-switch.db` 的 `proxy_request_logs` 表 + 解析 `~/.claude/projects/**/*.jsonl` 的 `"type":"user"` 行数
+2. 本地用"以 first user msg 为锚的固定 5h block"算法推算百分比 + 倒计时
+3. 配合最近 1h 速率推 ETA
+
+**为什么错了**：经审 cc-switch 源码（`src-tauri/src/services/subscription.rs`）发现：
+- cc-switch UI 上的 5h / 7d 配额数字**根本不在本地算**
+- 它直接调 `GET https://api.anthropic.com/api/oauth/usage`，用 Bearer OAuth token
+- 响应是官方权威的 `{utilization, resets_at}`，本地连一行 SQL 都不跑
+- Codex 走 `chatgpt.com/backend-api/wham/usage`、Gemini 走 `cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`
+- 而 cc-switch SQLite 里的 `proxy_request_logs` / `session_log_sync` 只是**成本审计 + token 历史**（且解析 jsonl 时它抓的是 `assistant` 消息，不是 `user`），和 5h 配额计算无关
+
+**根因结构性影响**：用户反馈的"数字偏高 / 偏低 / 与官方 console 不一致"是必然的，因为本地任何算法都无法精确复刻 Anthropic 服务器侧的 block 状态。
+
+**未来三条可能路径（按推荐度）**：
+1. **方案 B**：给 cc-switch 提 PR 让它每次拉完 `/api/oauth/usage` 顺手写 `~/.cc-switch/quota_snapshot.json`；我们读这个 JSON。最干净，零凭据问题，但节奏依赖上游
+2. **D8 私有 fork**：自己 fork cc-switch 加 5 行 Rust 写 snapshot；不依赖上游但要承担 rebase 成本
+3. **方案 A**：直接调同样的 Anthropic API，需复用 cc-switch 的 OAuth token（凭据存在哪 / 加密 / 刷新都是雷）
+
+**任何 MITM / DLL 注入 / 抓包解密类方案均被否决** —— HTTPS 加密 + 装根 CA 的安全代价远超数据价值。
+
+**搁置期内代码状态**：
+- `crates/core/src/usage.rs::analyze_5h_block` / `compute_eta` / `humanize_model_name` 全部保留作为 fallback；可继续显示但准确度有限
+- 当 cc-switch 未运行 / 未安装时，AI 相关 UI 全部隐藏（见下文"cc-switch 可用性检测"）
+
 ## 关键设计决策
+
+### cc-switch 可用性检测 + AI UI 条件隐藏
+- **判定** = `cc_switch::files_present()`（`~/.cc-switch/cc-switch.db` 存在）**AND** `cc-switch.exe` / `cc-switch` 进程在跑（用 sysinfo `refresh_processes_specifics(All, true, nothing())` 探测）
+- **载体**：`RuntimeFlags.cc_switch_available: AtomicBool`，由独立 OS 线程每 15s 探测一次；OverlayState 持有 `Option<Arc<RuntimeFlags>>` 供渲染时直接读 atomic（零同步成本）
+- **隐藏路径**（false 时全部生效）：
+  - 浮窗 row1 左上 Claude model tag 不画（measure + paint 双路径都加判断）
+  - 浮窗 row2：即便 `row2_mode == "usage"` 也强制 fallback 到 system（避免显示陈旧 / 误导数据）
+  - 托盘菜单：整个"第二行模式 ▸"子菜单隐藏（system 唯一选项就没意义）+ "用量明细..."顶层项隐藏
+  - 设置对话框 → 高级 tab：cc-switch 源 radio 组替换为 "⚠ 未检测到 cc-switch（请启动后重开本对话框）" 提示
+- **不隐藏**：浮窗本身、IP 行、监控行（system 模式）、历史时间线、所有非 AI 设置
 
 ### Win32 / windows-rs
 - **windows 0.59**：函数返回 `Result<>`，HWND 需 `Option<>` 包装，COLORREF 用 BGR 顺序构造器
 - **Unicode API**：所有窗口/对话框用 W 变体，避免中文乱码
 - **clipboard/layered**：用 `extern "system"` 直接声明，绕过 crate feature 缺失
 - **DWM 圆角**：`DWMWCP_ROUND` + 匹配背景画刷 + ClearType，减少锯齿
+- **DPI awareness (main.rs 启动最早处)**：`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)` 失败回退 `SYSTEM_AWARE`。**必须在创建任何 HWND 之前调用**——否则被 OS bitmap stretch，125%/150%/175% 缩放下文字 / 控件边缘明显毛刺
+- **统一 UI 字体（对话框）**：默认控件用 SYSTEM_FONT (Fixedsys 12pt 位图)，文字粗糙。`SystemParametersInfoW(SPI_GETNONCLIENTMETRICS)` 拿 `lfMessageFont`（Win10/11 上是 Segoe UI 9pt），改 `lfQuality = CLEARTYPE_QUALITY`，`CreateFontIndirectW` 出 HFONT 后 `EnumChildWindows` 统一 WM_SETFONT 应用，WM_DESTROY 时 DeleteObject。settings_dialog 已采用，其它对话框待补
+- **MD3 owner-draw 按钮擦底色**：`md3::draw_button` 在 RoundRect 之前的 FillRect **必须用按钮父窗口的实际背景** = `GetSysColorBrush(COLOR_3DFACE)`（所有对话框 hbrBackground 都用它）——否则圆角外露出色块。`GetSysColorBrush` 是系统 brush 不要 DeleteObject。DrawTextW 之前要 `WM_GETFONT` + SelectObject 把按钮控件字体显式 select 到 hdc，否则文字仍是 SYSTEM_FONT
 
 ### 窗口与生命周期
-- **Arc<WindowContext>**：`Arc::into_raw` 存进 `GWLP_USERDATA`，`WM_NCDESTROY` 里 `Arc::from_raw` 回收；子线程（如 lookup 对话框）持 Arc 克隆，**消除主退出时的 UAF**
-- **`lookup_dialog_open: AtomicBool`**：用 `compare_exchange` 防止重复打开查询窗口，且无数据竞争
+- **Arc<WindowContext>**：`Arc::into_raw` 存进 `GWLP_USERDATA`，`WM_NCDESTROY` 里 `Arc::from_raw` 回收；子线程持 Arc 克隆，**消除主退出时的 UAF**
 - **跨线程 HWND**：用 `usize` 中转；跨线程更新 UI 一律走 `PostMessageW(WM_APP_*)` 加 IsWindow 校验，禁止子线程直接 `SetWindowTextW`
 - **退出走 DestroyWindow**：`HOTKEY_QUIT` → `DestroyWindow` → `WM_DESTROY` → `PostQuitMessage` → `WM_NCDESTROY`（自动 unregister hotkey、KillTimer、回收 Arc）
 - **Mutex 中毒恢复**：所有 state 锁通过 `lock_state` 辅助，poison 时 `into_inner()` 而非 panic
@@ -160,9 +200,15 @@ Vpn_Monitor/
 
 ### 浮窗拖动 / 锁定 / 位置持久化
 - **拖动**：WM_NCHITTEST 默认 HTCLIENT，未锁定时提升为 HTCAPTION，OS 接管拖动
+- **锁定 + Shift 临时拖动**：锁定状态下 WM_NCHITTEST 默认拒绝，但 `GetAsyncKeyState(VK_SHIFT)` 高位 set 时仍返回 HTCAPTION，无需先去托盘解锁
 - **`auto_center: AtomicBool`**：默认 true 时宽度变化重新居中；拖动 / 加载持久化位置后翻转为 false，宽度变化用 SWP_NOMOVE 保留位置
 - **持久化**：`overlay_state.json` 独立文件存 `{ x, y, locked }`，每次拖动结束（WM_EXITSIZEMOVE）和正常退出（WM_DESTROY）都写盘
 - **不写 config.toml**：拖动频繁，避免覆盖主配置丢注释
+- **边缘吸附 + 屏外约束** (`snap_and_clamp`)：WM_EXITSIZEMOVE 调用，距工作区任一边 ≤ 12px 自动贴齐（SNAP_THRESHOLD）；再无论如何 clamp 到工作区内。启动恢复位置时也调一次 clamp（snap=false），处理"上次记的坐标在已拔掉的副显示器上"——`MonitorFromWindow(..MONITOR_DEFAULTTONEAREST)` 把已离屏的窗口夹回最近显示器
+- **托盘菜单"显示设置 ▸ 恢复默认位置"** (`IDM_RESET_POSITION`)：一键 auto_center=true + 按当前宽度调 `compute_window_origin` + SetWindowPos 顶部居中 + 写盘覆盖旧坐标；误拖到角落 / 多显示器拓扑变化后的救场入口
+- **Ctrl+Alt+方向键微调** (HOTKEY_NUDGE_UP/DOWN/LEFT/RIGHT)：4 个全局热键，每次平移 `NUDGE_STEP = 20px` + clamp 防出屏 + 关 auto_center + 写盘。锁定下也能用，比拖动更精准。`hotkey.rs::register_hotkeys` 内写死（不走 parse_hotkey）
+- **WS_EX_TRANSPARENT 警告**：开了 click_through 后，**所有鼠标事件（含 WM_NCHITTEST）都跳过本窗口**，所以拖动逻辑也拿不到机会触发——浮窗看似存在但鼠标完全穿透到下层。tray.rs / settings_dialog.rs 在 label 上加 "⚠ 开启后无法拖动" 的明确提示
+- **穿透 ↔ 锁定 联动** (`apply_passthrough_lock_link`)：双向蕴含 —— `click_through → overlay_locked`（穿透必然意味着不能拖，菜单状态保持一致避免迷惑）；`¬overlay_locked → ¬click_through`（用户主动解锁就是想拖了，免去再去托盘点一次关穿透）。托盘菜单两个 toggle 和设置对话框 apply 都走这条 helper，逻辑单点不漂移
 
 ### 托盘图标 + 多层右键菜单
 - Shell_NotifyIconW 注册嵌入的应用图标（资源 ID 1）
@@ -174,7 +220,7 @@ Vpn_Monitor/
     - `第二行模式 ▸` —— 系统资源 / AI 用量
     - `隐私 & 缓存 ▸` —— 日志掩码 IP / 日志掩码归属地 / 启用归属地缓存 / HTTPS 跨源校验
     - `文件 ▸` —— 打开 config.toml / 打开日志目录
-  - **顶层动作**（频繁用，直达）：IP 查询 / 历史时间线 / 用量明细 / 高级设置 / 退出
+  - **顶层动作**（频繁用，直达）：历史时间线 / [用量明细 (cc-switch 可用时)] / 高级设置 / 退出
 - 子菜单 HMENU 不需手动 DestroyMenu，DestroyMenu 父菜单会递归销毁
 - **立即生效**字段全部走 RuntimeFlags AtomicBool 或 ip_fetcher 静态 atomic，菜单点完下一次 tick 已生效
 
@@ -226,32 +272,47 @@ Vpn_Monitor/
 - **CSV 导出**：GetSaveFileNameW + UTF-8 BOM（Excel 才认中文）+ RFC 4180 转义
 - 所有过滤 / 删除都操作内存里 `visible_entries`，原始 `all_entries` 留作刷新对照
 
-### 浮窗双形态（simple / detailed）
-- `overlay_form` 字段 + RuntimeFlags.overlay_form（Arc<RwLock<String>>）热切换
-- ROW_HEIGHT 调整为 28（原 26，加大呼吸感）；新增 ROW3_HEIGHT = 64
-- **simple**：双行布局，总高 56（2 × 28）
-- **detailed**：**3 行**布局，总高 120（2 × 28 + 64）
-  - **第三行（全宽）**：顶部 8px **国家分布堆叠条** + 紧邻的国家 legend（top-3 "● US 60%"）+ 主体全宽双折线 sparkline
-  - 国家分布：来自 `tcp_table::summarize_by_country` [(country, count)]，颜色按字符串 FNV-1a hash → HSV
-  - 流量曲线：60 个 (up_bps, down_bps) 采样点（每次 monitor tick push），双折线，up=fg_latency 青色 / down=accent_green，按窗口 max 自动归一化
-  - 右下角小字标当前最高速率
-- 托盘菜单 `IDM_FORM_SIMPLE` / `IDM_FORM_DETAILED` 切换 → RuntimeFlags + state 同步 + recalc_overlay_width（手动重测宽 + 重设高度 + SetWindowPos）
+### 浮窗布局
+- 固定双行：`WIN_HEIGHT = ROW_HEIGHT * 2 = 56`。ROW_HEIGHT = 28 给呼吸感
+- Row 1：状态点 + Claude tag + IP + 归属地 + 延迟 + 代理节点 + 泄漏徽章
+- Row 2：可在 `system`（↑↓+CPU+内存）/ `usage`（AI 用量）之间切换 —— 见下
+- 历史上曾有 `detailed` 形态展示流量曲线 + 国家分布堆叠条，因低价值已移除（连带删除 `src/tcp_table.rs` / `traffic_history` / `traffic_by_country` / `IDM_FORM_*` / RuntimeFlags.overlay_form）
 
 ### Row 2 双模式（system / usage）
 - `row2_mode` 字段 + RuntimeFlags.row2_mode 热切换
 - **system**：↑/↓ + CPU + 内存（沿用 monitor 数据）
-- **usage**：主用模型 + 5小时配额% + 倒计时 + 7天配额% + 倒计时
-  - 显示格式：`{model} · 5小时:26% 41m · 7天:56% 1d1h`
+- **usage**：`{model} · 5h:N% reset_in [⚠约eta耗尽] · 7d:N% reset_in`
+  - **模型名走 `humanize_model_name`** → `claude-sonnet-4-7-20251201` 显示为 "Sonnet 4.6/4.7"，`gpt-4o-2024-11-20` 显示为 "GPT-4o"。识别失败则截掉 `-YYYYMMDD` 后缀原样展示
   - **百分比基准 = 真实用户消息数 / 配置上限**（与 cc-switch UI 口径一致）
   - 真实用户消息从 `~/.claude/projects/**/*.jsonl` 解析：行含 `"type":"user"` 且 **不含** `tool_use_id`（后者是 Claude 工具调用结果回传，1 次用户消息可触发 5–10 次这种回传）
   - 之前用 `proxy_request_logs.request_count` 会把 1 条消息算 ~7 次（含工具循环），用 `total_cost_usd` 会因 API 列表价 ≫ 订阅价而严重偏高，都不对
   - 文件列表通过 cc-switch 自己维护的 `session_log_sync` 表取，只读 `last_modified` 落在窗口内的（性能优化）
   - 时间戳用手写 ISO8601 → unix 转换，不引 chrono 到 core
   - 配置：`usage_5h_limit_requests`（默认 50，Anthropic Pro 真实配额；Max 用户改 250）/ `usage_week_limit_requests`（默认 1000，Max 改 5000）
-  - 倒计时 = 窗口内**最早用户消息** + 窗口长度 - now；格式：<60m → `Nm`、<24h → `NhMm`、≥24h → `NdMh`
   - 百分比着色：<60% 次要色 / 60-85% 橙 / >85% 红
   - 配额 = 0 时退化为只显示绝对消息数
 - 托盘菜单 `IDM_ROW2_SYSTEM` / `IDM_ROW2_USAGE` 切换
+
+### 5h 窗口固定 block 算法 (`analyze_5h_block`)
+**根本问题**：早期实现用"最近 5 小时滚动窗口"，每条新消息都把窗口往前推 → 百分比和 reset 倒计时双双失准，与 Anthropic console 显示偏差大；用户报告"数字偏高/偏低/倒计时不对"全是这个根因。
+
+**新算法**（Anthropic 真实语义）：
+1. 拉过去 10h 内所有真用户消息时间戳，升序排序
+2. greedy 切 block：从最早一条开始作为 `block_start`，每遇到 `ts >= block_start + 5h` 就开新 block
+3. **当前 block** = 最后一个 `block_start + 5h > now` 的 block
+4. 若最后一个 block 已结束（`block_end <= now`），说明配额已重置但用户还没发新消息 → 返回 (0, None)
+5. reset 倒计时 = `block_start + 5h - now`，整个 block 期间稳定不跳变
+
+5h block 实现：`crates/core/src/usage.rs::analyze_5h_block`；7d 窗口仍用滚动近似（reset 时间不严格）。
+**回扫 10h** 是为了保证能识别"上个 block 刚结束 + 当前 block 已快到 5h" 这种边界情况。
+
+### ETA 预计耗尽 (`compute_eta`)
+- 仅 5h 窗口计算（7d 速率波动太大没意义）
+- 速率 = 最近 1h 真用户消息数 / 3600（msgs/s）
+- 剩余 = limit - 当前 block 内 count
+- ETA = remaining / rate，秒数；rate=0 / limit=0 / current>=limit → None
+- 浮窗渲染：仅当 5h 百分比 ≥ 60% 时显示 ` ⚠约{Nm/NhMm}耗尽`，颜色跟随 pct_color（橙/红），低于 60% 不显示避免噪声
+- 配置入口：`read_usage_stats_with_limits(app_type, limit_5h, limit_week)`，main.rs 后台 task 传 config 配额
 
 ### cc-switch SQLite 用量集成（core/usage.rs）
 - 读 `~/.cc-switch/cc-switch.db` 的 **proxy_request_logs** 表（cc-switch proxy 模式下记录每次请求）
@@ -350,10 +411,10 @@ cargo build --release      # 发布编译（~2.5MB 单文件 exe，含 toml_edit
 | `click_through` | false | 鼠标穿透 | ✅ |
 | `opacity` | 0.85 | 浮窗不透明度 (0.0–1.0) | ✅ |
 | `position` | "top-center" | 位置（预留；实际由 overlay_state.json 持久化） | — |
-| `show_isp` | true | 是否在查询窗口显示 ISP | 重启 |
+| `show_isp` | true | 是否显示 ISP（保留作历史窗口列展示用） | 重启 |
 | `hotkey_toggle` | ctrl+alt+h | 显隐快捷键 | 重启 |
-| `hotkey_lookup` | ctrl+alt+i | IP 查询快捷键 | 重启 |
 | `hotkey_quit` | ctrl+alt+shift+k | 退出快捷键 | 重启 |
+| _(写死)_ Ctrl+Alt+↑↓←→ | — | 浮窗位置 ±20px 微调（锁定下也可用） | — |
 | `timeout` | 5 | HTTP 请求超时（秒） | 重启 |
 | `max_retries` | 3 | 连续失败几次后浮窗显示红色 | 重启 |
 | `proxy` | None | 出口代理 URL (可选) | 重启 |

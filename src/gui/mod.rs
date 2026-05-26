@@ -1,6 +1,5 @@
 pub mod history_dialog;
 pub mod hotkey;
-pub mod lookup_dialog;
 pub mod md3;
 pub mod overlay_state;
 pub mod render;

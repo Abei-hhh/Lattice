@@ -32,17 +32,17 @@ pub const IDM_TOGGLE_MASK_IP: u32 = 8004;
 pub const IDM_TOGGLE_MASK_GEO: u32 = 8005;
 pub const IDM_TOGGLE_GEO_CACHE: u32 = 8006;
 pub const IDM_TOGGLE_CROSS_CHECK: u32 = 8007;
-pub const IDM_LOOKUP: u32 = 8010;
 pub const IDM_OPEN_CONFIG: u32 = 8011;
 pub const IDM_OPEN_LOG_DIR: u32 = 8012;
 pub const IDM_HISTORY: u32 = 8013;
 pub const IDM_ADVANCED: u32 = 8014;
 pub const IDM_USAGE_DETAIL: u32 = 8015;
-// 新增：浮窗形态切换 + 第二行模式切换
-pub const IDM_FORM_SIMPLE: u32 = 8020;
-pub const IDM_FORM_DETAILED: u32 = 8021;
+// 第二行模式切换
 pub const IDM_ROW2_SYSTEM: u32 = 8022;
 pub const IDM_ROW2_USAGE: u32 = 8023;
+/// 一键把浮窗位置恢复到当前显示器工作区顶部居中（清 overlay_state.json 里
+/// 的 x/y，重新打开 auto_center），适合误拖到角落 / 多显示器拓扑变化后救场。
+pub const IDM_RESET_POSITION: u32 = 8024;
 pub const IDM_QUIT: u32 = 8099;
 
 /// Register a notification icon associated with `hwnd`. The icon uses the
@@ -107,41 +107,35 @@ pub unsafe fn show_menu(hwnd: HWND, flags: &Arc<RuntimeFlags>) {
     let mask_ip = crate::network::ip_fetcher::get_mask_ip_logs();
     let mask_geo = crate::network::ip_fetcher::get_mask_geo_logs();
 
-    // 读浮窗形态 + Row 2 模式（用于子菜单 radio）
-    let form = flags
-        .overlay_form
-        .read()
-        .map(|g| g.clone())
-        .unwrap_or_else(|p| p.into_inner().clone());
+    // 读 Row 2 模式（用于子菜单 radio）
     let row2 = flags
         .row2_mode
         .read()
         .map(|g| g.clone())
         .unwrap_or_else(|p| p.into_inner().clone());
+    // cc-switch 不可用时 AI 菜单项全部隐藏
+    let ai_enabled = flags.cc_switch_available.load(Ordering::Relaxed);
 
     // ── 子菜单：显示设置（visible / lock / click-through） ──
     let display_sub = CreatePopupMenu().ok();
     if let Some(sub) = display_sub {
         add_check(sub, IDM_TOGGLE_VISIBLE, "显示浮窗", visible);
-        add_check(sub, IDM_TOGGLE_LOCK, "锁定位置", locked);
-        add_check(sub, IDM_TOGGLE_CLICKTHROUGH, "鼠标穿透", click_thru);
+        add_check(sub, IDM_TOGGLE_LOCK, "锁定位置 (按 Shift 拖动 / 关闭会自动关穿透)", locked);
+        add_check(sub, IDM_TOGGLE_CLICKTHROUGH, "鼠标穿透 (⚠ 自动锁定位置)", click_thru);
+        add_sep(sub);
+        add_item(sub, IDM_RESET_POSITION, "恢复默认位置");
         attach_submenu(menu, sub, "显示设置 ▸");
     }
 
-    // ── 子菜单：浮窗形态（simple / detailed） ──
-    let form_sub = CreatePopupMenu().ok();
-    if let Some(sub) = form_sub {
-        add_check(sub, IDM_FORM_SIMPLE, "简易", form == "simple");
-        add_check(sub, IDM_FORM_DETAILED, "完整 (含流量曲线)", form == "detailed");
-        attach_submenu(menu, sub, "浮窗形态 ▸");
-    }
-
     // ── 子菜单：第二行模式（system / usage） ──
-    let row2_sub = CreatePopupMenu().ok();
-    if let Some(sub) = row2_sub {
-        add_check(sub, IDM_ROW2_SYSTEM, "系统资源 (↑↓/CPU/内存)", row2 == "system");
-        add_check(sub, IDM_ROW2_USAGE, "AI 用量 (主模型/5h/周)", row2 == "usage");
-        attach_submenu(menu, sub, "第二行模式 ▸");
+    // AI 用量项仅 cc-switch 可用时出现；不可用时连整个子菜单都隐藏（system 是唯一选项就没意义）
+    if ai_enabled {
+        let row2_sub = CreatePopupMenu().ok();
+        if let Some(sub) = row2_sub {
+            add_check(sub, IDM_ROW2_SYSTEM, "系统资源 (↑↓/CPU/内存)", row2 == "system");
+            add_check(sub, IDM_ROW2_USAGE, "AI 用量 (主模型/5h/周)", row2 == "usage");
+            attach_submenu(menu, sub, "第二行模式 ▸");
+        }
     }
 
     // ── 子菜单：隐私 & 缓存 ──
@@ -156,9 +150,11 @@ pub unsafe fn show_menu(hwnd: HWND, flags: &Arc<RuntimeFlags>) {
 
     add_sep(menu);
     // 动作类（顶层直接可见，频繁用）
-    add_item(menu, IDM_LOOKUP, "IP 查询...");
     add_item(menu, IDM_HISTORY, "历史时间线...");
-    add_item(menu, IDM_USAGE_DETAIL, "用量明细...");
+    // 用量明细仅在 cc-switch 可用时出现
+    if ai_enabled {
+        add_item(menu, IDM_USAGE_DETAIL, "用量明细...");
+    }
     add_sep(menu);
     add_item(menu, IDM_ADVANCED, "高级设置...");
 
