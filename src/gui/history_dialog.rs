@@ -89,10 +89,10 @@ impl HistoryDialog {
     pub fn show(&mut self, parent: HWND) {
         unsafe {
             // 注册一次窗口类（多次注册无害，OS 会返回 ERROR_CLASS_ALREADY_EXISTS）
-            let hmodule = GetModuleHandleA(windows::core::s!("vpn-monitor.exe"))
+            let hmodule = GetModuleHandleA(windows::core::s!("lattice.exe"))
                 .unwrap_or_default();
             let hinstance: HINSTANCE = hmodule.into();
-            let class_name = w!("VpnMonitorHistory");
+            let class_name = w!("LatticeHistory");
 
             let app_icon = LoadIconW(Some(hinstance), windows::core::PCWSTR(1 as *const _))
                 .unwrap_or_default();
@@ -204,7 +204,7 @@ unsafe fn create_controls(hwnd: HWND) -> LRESULT {
     if dlg_ptr.is_null() {
         return LRESULT(0);
     }
-    let hinst: HINSTANCE = GetModuleHandleA(windows::core::s!("vpn-monitor.exe"))
+    let hinst: HINSTANCE = GetModuleHandleA(windows::core::s!("lattice.exe"))
         .unwrap_or_default()
         .into();
 

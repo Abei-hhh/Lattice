@@ -1,4 +1,4 @@
-# CLAUDE.md - Vpn_Monitor 项目指南
+# CLAUDE.md - Lattice 项目指南
 
 ## 项目概述
 
@@ -9,11 +9,11 @@ Windows 11 后台悬浮窗应用，Rust 编写。顶部显示当前公网 IP + �
 **Workspace 结构**（Phase 0 已完成）：
 
 ```
-Vpn_Monitor/
+Lattice/
 ├── Cargo.toml             ← [workspace] + binary [package]，公共依赖在 [workspace.dependencies]
 ├── crates/
-│   └── core/              ← 平台无关核心（Linux/macOS 上 cargo build -p vpn-monitor-core 也能编）
-│       ├── Cargo.toml     ← vpn-monitor-core lib
+│   └── core/              ← 平台无关核心（Linux/macOS 上 cargo build -p lattice-core 也能编）
+│       ├── Cargo.toml     ← lattice-core lib
 │       └── src/
 │           ├── lib.rs
 │           ├── config.rs       ← AppConfig + TOML 加载 + 快捷键解析
@@ -29,7 +29,7 @@ Vpn_Monitor/
 │               └── leak_check.rs   ← DNS / IPv6 泄漏检测（v6 IP + Cloudflare /cdn-cgi/trace）
 ├── src/                    ← Windows 桌面 binary（GUI 壳 + 平台特定监控）
 │   ├── main.rs                 ← 单实例守卫、tokio runtime、后台 task；
-│   │                             `pub use vpn_monitor_core::{...}` 让 gui/ 子模块继续用
+│   │                             `pub use lattice_core::{...}` 让 gui/ 子模块继续用
 │   │                             `crate::config::*` 等路径无需大改
 │   ├── monitor.rs              ← Win32 注册表代理检测、端口并发扫描、GetLastInputInfo 空闲探测
 │   └── gui/                    ← 全 Win32 UI（详见下文）
@@ -55,8 +55,8 @@ Vpn_Monitor/
 **workspace 路径备忘**：
 
 - binary 子 crate（`src/`）内部仍可继续用 `crate::config::*` / `crate::network::*` 等老路径 ——
-  `main.rs` 顶部一行 `pub use vpn_monitor_core::{cc_switch, config, network, runtime};` 做了 alias。
-- 若新写代码，推荐直接 `use vpn_monitor_core::config::AppConfig;` 表达更清楚的跨 crate 依赖关系。
+  `main.rs` 顶部一行 `pub use lattice_core::{cc_switch, config, network, runtime};` 做了 alias。
+- 若新写代码，推荐直接 `use lattice_core::config::AppConfig;` 表达更清楚的跨 crate 依赖关系。
 
 ## ⚠️ AI 用量计算 — 已搁置 (2026-05-26)
 
@@ -127,8 +127,8 @@ Vpn_Monitor/
 
 ### 单实例
 - **三重防御**：
-  1. 命名 mutex `Vpn_Monitor_SingleInstance_v1`，`CreateMutexW` 和 `GetLastError` 在**同一 unsafe 块**内捕获（防中间 syscall 清错误码）
-  2. mutex 检查未拦下也用 `FindWindowA("VpnMonitorOverlay")` 兜底
+  1. 命名 mutex `Lattice_SingleInstance_v1`，`CreateMutexW` 和 `GetLastError` 在**同一 unsafe 块**内捕获（防中间 syscall 清错误码）
+  2. mutex 检查未拦下也用 `FindWindowA("LatticeOverlay")` 兜底
   3. 找到旧窗口则 `ShowWindow` + 强制 topmost 后退出新进程
 - 解决"快速双击导致多浮窗、热键失灵"的根因（第二实例注册热键失败，第一实例仍拥有，看似打不开/关不掉）
 
@@ -173,7 +173,7 @@ Vpn_Monitor/
 - **/24 网段归并**：v4 `a.b.c.0/24`、v6 前 48 位作 key —— 同 ISP 节点池命中率从 ~30% 跃升到 ~80%
 - **LRU + 上限**：`VecDeque` 维护访问顺序，超 `geo_cache_max_entries`（默认 1000）淘汰最老
 - **原子写盘**：每次 insert 全量重写 JSON（量级 KB，便宜），`tmp + rename` 防中途崩溃留半写
-- **路径**：`%APPDATA%\Vpn_Monitor\geo_cache.json`
+- **路径**：`%APPDATA%\Lattice\geo_cache.json`
 - **公开 API**：`get(ip)` / `insert(ip, geo)` / `remove(key)` / `history()` — 后两个分别给设置·历史窗口用
 - **旧格式平滑迁移**：发现 JSON 是裸 HashMap（早期版本）自动转成新 `DiskFormat { entries, lru }`
 
@@ -367,7 +367,7 @@ cargo build                # 调试编译
 cargo build --release      # 发布编译（~2.5MB 单文件 exe，含 toml_edit）
 ```
 
-发布编译前需确保没有运行中的 `vpn-monitor.exe` 锁定输出。
+发布编译前需确保没有运行中的 `lattice.exe` 锁定输出。
 
 **运行时无需重启的修改**：托盘菜单切换的所有开关 + 高级设置对话框中标"✅"的字段 + 拖动浮窗。其余字段编辑后会弹"需重启"提示。
 
@@ -388,7 +388,7 @@ cargo build --release      # 发布编译（~2.5MB 单文件 exe，含 toml_edit
 
 ## 配置
 
-路径：与 `vpn-monitor.exe` 同目录的 `config.toml`。**首次启动自动生成默认文件**。
+路径：与 `lattice.exe` 同目录的 `config.toml`。**首次启动自动生成默认文件**。
 
 通过托盘 → "高级设置..." 可视化编辑（保留注释）；也可直接编辑 toml，**部分字段需重启**生效。
 
@@ -408,7 +408,7 @@ cargo build --release      # 发布编译（~2.5MB 单文件 exe，含 toml_edit
 | `timeout` | 5 | HTTP 请求超时（秒） | 重启 |
 | `max_retries` | 3 | 连续失败几次后浮窗显示红色 | 重启 |
 | `proxy` | None | 出口代理 URL (可选) | 重启 |
-| `enable_log` | false | 写日志到 `%APPDATA%\Vpn_Monitor\` | 重启 |
+| `enable_log` | false | 写日志到 `%APPDATA%\Lattice\` | 重启 |
 | `monitor_interval` | 2 | CPU/内存/网速 刷新间隔（秒） | 重启 |
 | `proxy_check_interval` | 30 | 代理检测间隔（秒） | 重启 |
 | `model_refresh_interval` | 5 | Claude 标签刷新（秒），0 关闭 | 重启 |
@@ -431,9 +431,9 @@ cargo build --release      # 发布编译（~2.5MB 单文件 exe，含 toml_edit
 
 | 路径 | 内容 |
 |---|---|
-| `%APPDATA%\Vpn_Monitor\geo_cache.json` | IP→Geo LRU 缓存（DiskFormat { entries, lru }） |
-| `%APPDATA%\Vpn_Monitor\overlay_state.json` | 浮窗位置 + 锁定状态（拖动时刷盘） |
-| `%APPDATA%\Vpn_Monitor\vpn-monitor.log` | 启用日志后写到这里（5MB 自动轮换） |
+| `%APPDATA%\Lattice\geo_cache.json` | IP→Geo LRU 缓存（DiskFormat { entries, lru }） |
+| `%APPDATA%\Lattice\overlay_state.json` | 浮窗位置 + 锁定状态（拖动时刷盘） |
+| `%APPDATA%\Lattice\lattice.log` | 启用日志后写到这里（5MB 自动轮换） |
 | `~/.cc-switch/cc-switch.db` (**只读外部依赖**) | cc-switch 写入；本工具读 `proxy_request_logs` 表做用量统计 |
 | `~/.cc-switch/settings.json` (**只读外部依赖**) | cc-switch 写入；本工具读 `currentProvider*` 字段做多源检测 |
 | `~/.claude/settings.json` (**只读外部依赖**) | Claude Code / cc-switch 写入；本工具读 `env.ANTHROPIC_MODEL` 拿当前 Claude 模型 |

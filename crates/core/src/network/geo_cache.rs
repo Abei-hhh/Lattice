@@ -265,8 +265,8 @@ fn save_to_disk(path: &PathBuf, data: &DiskFormat) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Default cache location: `%APPDATA%\Vpn_Monitor\geo_cache.json` on Windows.
+/// Default cache location: `%APPDATA%\Lattice\geo_cache.json` on Windows.
 pub fn default_cache_path() -> Option<PathBuf> {
     let data = dirs::data_dir()?;
-    Some(data.join("Vpn_Monitor").join("geo_cache.json"))
+    Some(data.join("Lattice").join("geo_cache.json"))
 }

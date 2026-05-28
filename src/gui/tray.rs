@@ -49,7 +49,7 @@ pub const IDM_QUIT: u32 = 8099;
 /// app's default IDI_APPLICATION until we wire a real .ico — adequate as a
 /// placeholder and means we don't need to embed a resource yet.
 pub unsafe fn register(hwnd: HWND) {
-    let tip: Vec<u16> = "Vpn Monitor".encode_utf16().chain(std::iter::once(0)).collect();
+    let tip: Vec<u16> = "Lattice".encode_utf16().chain(std::iter::once(0)).collect();
     let mut tip_arr = [0u16; 128];
     for (i, c) in tip.iter().take(127).enumerate() {
         tip_arr[i] = *c;

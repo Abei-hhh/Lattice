@@ -19,8 +19,8 @@ mod monitor;
 
 // 把 core crate 的子模块 re-export 成本地 `crate::xxx`，让 gui/* 等子模块原有
 // `crate::config::...` / `crate::network::...` 等路径不用动。
-// 这是过渡阶段的简化策略；后续可逐步迁移到直接 `vpn_monitor_core::...`。
-pub use vpn_monitor_core::{cc_switch, config, network, runtime};
+// 这是过渡阶段的简化策略；后续可逐步迁移到直接 `lattice_core::...`。
+pub use lattice_core::{cc_switch, config, network, runtime};
 
 use gui::render::{CheckStatus, IpUpdate, OverlayState, SharedState};
 use gui::window::UiUpdate;
@@ -44,7 +44,7 @@ fn panic_payload_string(payload: &Box<dyn std::any::Any + Send>) -> String {
 
 fn show_error_dialog(msg: &str) {
     let body: Vec<u16> = msg.encode_utf16().chain(std::iter::once(0)).collect();
-    let title: Vec<u16> = "Vpn Monitor"
+    let title: Vec<u16> = "Lattice"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -62,7 +62,7 @@ fn show_error_dialog(msg: &str) {
 /// Returns true if an existing window was found.
 fn try_focus_existing_instance() -> bool {
     unsafe {
-        match FindWindowA(s!("VpnMonitorOverlay"), None) {
+        match FindWindowA(s!("LatticeOverlay"), None) {
             Ok(hwnd) if !hwnd.is_invalid() => {
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 let _ = SetWindowPos(
@@ -89,7 +89,7 @@ fn read_active_source_label(source: &str) -> String {
 }
 
 #[derive(Parser)]
-#[command(name = "vpn-monitor")]
+#[command(name = "lattice")]
 #[command(about = "Windows IP status overlay - shows public IP and geolocation")]
 struct Args {
     /// Path to config file
@@ -104,11 +104,11 @@ fn try_init_logging(enable_log: bool) {
     let Some(data_dir) = dirs::data_dir() else {
         return;
     };
-    let log_dir = data_dir.join("Vpn_Monitor");
+    let log_dir = data_dir.join("Lattice");
     if std::fs::create_dir_all(&log_dir).is_err() {
         return;
     }
-    let log_path = log_dir.join("vpn-monitor.log");
+    let log_path = log_dir.join("lattice.log");
 
     const MAX_LOG_SIZE: u64 = 5 * 1024 * 1024;
     if let Ok(meta) = std::fs::metadata(&log_path) {
@@ -129,10 +129,27 @@ fn try_init_logging(enable_log: bool) {
         .try_init();
 
     tracing::info!("日志文件: {}", log_path.display());
-    tracing::info!("Vpn_Monitor starting...");
+    tracing::info!("Lattice starting...");
+}
+
+/// 升级路径迁移：从 v2.0.0 起项目改名 Vpn_Monitor → Lattice，对应数据目录
+/// 也从 `%APPDATA%\Vpn_Monitor\` 移到 `%APPDATA%\Lattice\`。这段在启动最早处
+/// 跑一次（早于日志 / 配置初始化），把整个旧目录 rename 过来。
+/// 触发条件：旧目录存在 **且** 新目录不存在（避免覆盖任何已有数据）。
+/// 失败静默 —— 用户最多看到 geo 缓存重头建、浮窗位置回到默认，但不阻断启动。
+fn migrate_legacy_appdata() {
+    let Some(data_dir) = dirs::data_dir() else { return };
+    let legacy = data_dir.join("Vpn_Monitor");
+    let target = data_dir.join("Lattice");
+    if legacy.exists() && !target.exists() {
+        let _ = std::fs::rename(&legacy, &target);
+    }
 }
 
 fn main() {
+    // 必须先于 try_init_logging / load_config / GeoCache::new 等任何读 %APPDATA% 的代码。
+    migrate_legacy_appdata();
+
     // ── DPI awareness ─────────────────────────────────────────────
     // Per-Monitor V2 让我们自己处理每个显示器的 DPI 缩放（接 WM_DPICHANGED），
     // 而不是被 OS bitmap-stretch（默认行为）。后者在 125%/150%/175% 缩放下
@@ -157,7 +174,7 @@ fn main() {
         let h = windows::Win32::System::Threading::CreateMutexW(
             None,
             true,
-            windows::core::w!("Vpn_Monitor_SingleInstance_v1"),
+            windows::core::w!("Lattice_SingleInstance_v1"),
         );
         let exists = GetLastError() == ERROR_ALREADY_EXISTS;
         (h, exists)
@@ -214,7 +231,7 @@ fn main() {
 
     let mut client_builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(config.timeout))
-        .user_agent("VpnMonitor/1.0");
+        .user_agent("Lattice/1.0");
 
     if let Some(proxy) = &config.proxy {
         match reqwest::Proxy::all(proxy) {
@@ -498,7 +515,7 @@ fn main() {
     let monitor_idle_threshold = config.idle_threshold_seconds;
     let monitor_idle_multiplier = config.idle_multiplier;
     std::thread::Builder::new()
-        .name("vpn-monitor-sysmon".into())
+        .name("lattice-sysmon".into())
         .spawn(move || {
             // Restart on panic; if the channel is gone, monitor_loop_sync
             // returns normally and we exit the supervisor too.
@@ -552,7 +569,7 @@ fn main() {
         let rpc_client = client.clone();
         rt.spawn(async move {
             loop {
-                let snap = vpn_monitor_core::proxy_rpc::detect(&rpc_client).await;
+                let snap = lattice_core::proxy_rpc::detect(&rpc_client).await;
                 if let Ok(mut s) = rpc_state.lock() {
                     s.proxy_rpc = snap;
                 }
@@ -583,7 +600,7 @@ fn main() {
                         .map(|g| g.country_code.clone())
                         .filter(|c| !c.is_empty())
                 };
-                let report = vpn_monitor_core::network::leak_check::check_leaks(
+                let report = lattice_core::network::leak_check::check_leaks(
                     &leak_client,
                     v4_cc.as_deref(),
                     Duration::from_secs(3),
@@ -603,12 +620,12 @@ fn main() {
     {
         let flags = runtime_flags.clone();
         std::thread::Builder::new()
-            .name("vpn-monitor-ccswitch-probe".into())
+            .name("lattice-ccswitch-probe".into())
             .spawn(move || {
                 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
                 let mut sys = System::new();
                 loop {
-                    let files_ok = vpn_monitor_core::cc_switch::files_present();
+                    let files_ok = lattice_core::cc_switch::files_present();
                     let proc_ok = if files_ok {
                         // 只在文件存在时才付进程枚举的代价。
                         sys.refresh_processes_specifics(
@@ -646,7 +663,7 @@ fn main() {
                     .read()
                     .map(|g| g.clone())
                     .unwrap_or_else(|p| p.into_inner().clone());
-                let usage = vpn_monitor_core::usage::read_usage_stats_with_limits(
+                let usage = lattice_core::usage::read_usage_stats_with_limits(
                     &source, limit_5h, limit_week,
                 );
                 if let Ok(mut s) = usage_state.lock() {
@@ -694,5 +711,5 @@ fn main() {
         persisted,
     );
 
-    tracing::info!("Vpn_Monitor exiting...");
+    tracing::info!("Lattice exiting...");
 }

@@ -1,6 +1,6 @@
-# Vpn_Monitor 多平台适配文档
+# Lattice 多平台适配文档
 
-> 目标：把 Windows 独占的 Vpn_Monitor 演进为 Windows / Linux / macOS / Android / iOS 五端可用。
+> 目标：把 Windows 独占的 Lattice 演进为 Windows / Linux / macOS / Android / iOS 五端可用。
 > 本文给出**现状审计 → 分层重构 → 各平台路径 → 选型对比 → 工作量预估 → 推荐路线图**。
 
 ## TL;DR
@@ -13,7 +13,7 @@
 | **Android** | ⚠️ 需 SYSTEM_ALERT_WINDOW 权限，部分 OEM 阻断 | Compose + Rust JNI + 前台服务 | ★★★★ |
 | **iOS** | ❌ 系统禁止悬浮窗 | 改用 Live Activity / Widget / 应用内首屏 | ★★★★★ |
 
-**核心建议**：拆出 `vpn-monitor-core` 共享 Rust crate（网络 / 缓存 / cc-switch / 配置），各平台只写 UI 壳。桌面三端用同一套 egui，移动端用平台原生 UI 调 Rust core。
+**核心建议**：拆出 `lattice-core` 共享 Rust crate（网络 / 缓存 / cc-switch / 配置），各平台只写 UI 壳。桌面三端用同一套 egui，移动端用平台原生 UI 调 Rust core。
 
 ---
 
@@ -55,7 +55,7 @@
 ### 2.1 目标 workspace 结构
 
 ```
-vpn-monitor/
+lattice/
 ├── crates/
 │   ├── core/              # 平台无关：网络、缓存、配置、cc-switch、runtime flags
 │   │   ├── src/
@@ -160,9 +160,9 @@ pub fn current() -> Arc<dyn Platform> { Arc::new(linux::LinuxPlatform::new()) }
 | 代理检测 | 读 `$http_proxy` / `$HTTPS_PROXY` 环境变量 + GNOME `gsettings get org.gnome.system.proxy mode` + KDE `~/.config/kioslaverc` |
 | 主题探测 | GNOME: `gsettings get org.gnome.desktop.interface color-scheme`；KDE: `~/.config/kdeglobals`；通用：`xdg-portal` color scheme |
 | 用户空闲 | X11: `XScreenSaverQueryInfo`；Wayland: `org.gnome.Mutter.IdleMonitor` D-Bus |
-| 单实例 | `flock` `~/.local/share/vpn-monitor/single.lock` |
-| 图标 | `.desktop` + `~/.local/share/icons/hicolor/256x256/apps/vpn-monitor.png` |
-| 自启 | `~/.config/autostart/vpn-monitor.desktop` |
+| 单实例 | `flock` `~/.local/share/lattice/single.lock` |
+| 图标 | `.desktop` + `~/.local/share/icons/hicolor/256x256/apps/lattice.png` |
+| 自启 | `~/.config/autostart/lattice.desktop` |
 | 打包 | AppImage（推荐）/ Flatpak / .deb / .rpm |
 
 #### 工作量
@@ -342,7 +342,7 @@ pub fn current() -> Arc<dyn Platform> { Arc::new(linux::LinuxPlatform::new()) }
 
 `crates/core/` 子包已抽出，包含 `network/`、`config.rs`、`cc_switch.rs`、`runtime.rs` —— 这些模块在 Linux/macOS 上**无需任何修改**即可编译运行（仅靠 `reqwest`/`tokio`/`dirs`/`serde` 等已跨平台的 crate）。
 
-binary crate 通过 `pub use vpn_monitor_core::{cc_switch, config, network, runtime};` 做路径 alias，旧 `crate::*` 引用全部不变。后续在 binary 内逐步迁移到直接 `vpn_monitor_core::*` 形式。
+binary crate 通过 `pub use lattice_core::{cc_switch, config, network, runtime};` 做路径 alias，旧 `crate::*` 引用全部不变。后续在 binary 内逐步迁移到直接 `lattice_core::*` 形式。
 
 **platform trait 抽象**（监控 / 单实例 / 主题探测 / 空闲探测）留给 Phase 0.5：等 Linux 实施时同步落地，避免空抽象。
 
@@ -480,7 +480,7 @@ ip-api.com 响应里已有 `as`/`asname` 字段（如 `AS13335 Cloudflare`），
 实施位置：`src/gui/toast.rs`，依赖 `winrt-notification` 或手写 ToastNotificationManager
 
 #### Tasker / Shortcuts 集成
-- Windows: 暴露 PowerShell module（`Get-VpnMonitorState`）
+- Windows: 暴露 PowerShell module（`Get-LatticeState`）
 - macOS: 注册 Shortcuts action "What's my IP?"
 - Android: Tasker plugin（IP 变化 → 触发任意脚本）
 

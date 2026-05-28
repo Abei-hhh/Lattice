@@ -308,7 +308,7 @@ pub fn create_and_run(
     unsafe {
         let hmodule = GetModuleHandleA(None).unwrap_or_default();
         let hinstance: HINSTANCE = hmodule.into();
-        let class_name = s!("VpnMonitorOverlay");
+        let class_name = s!("LatticeOverlay");
 
         let bg_brush = CreateSolidBrush(render::BG_COLOR);
 
@@ -401,7 +401,7 @@ pub fn create_and_run(
                 lines.join("\n")
             );
             let body_w: Vec<u16> = body.encode_utf16().chain(std::iter::once(0)).collect();
-            let title_w: Vec<u16> = "Vpn Monitor — 热键冲突".encode_utf16().chain(std::iter::once(0)).collect();
+            let title_w: Vec<u16> = "Lattice — 热键冲突".encode_utf16().chain(std::iter::once(0)).collect();
             MessageBoxW(
                 None,
                 windows::core::PCWSTR(body_w.as_ptr()),
@@ -835,7 +835,7 @@ unsafe extern "system" fn window_proc(
                         let cache = ctx.geo_cache.clone();
                         let parent_raw = hwnd.0 as usize;
                         std::thread::Builder::new()
-                            .name("vpn-monitor-history".into())
+                            .name("lattice-history".into())
                             .spawn(move || {
                                 let parent = HWND(parent_raw as *mut _);
                                 let mut dlg =
@@ -848,7 +848,7 @@ unsafe extern "system" fn window_proc(
                         // AI 用量明细窗口
                         let parent_raw = hwnd.0 as usize;
                         std::thread::Builder::new()
-                            .name("vpn-monitor-usage".into())
+                            .name("lattice-usage".into())
                             .spawn(move || {
                                 let parent = HWND(parent_raw as *mut _);
                                 let mut dlg = super::usage_dialog::UsageDialog::new();
@@ -861,7 +861,7 @@ unsafe extern "system" fn window_proc(
                         let runtime_flags = ctx.runtime_flags.clone();
                         let overlay_hwnd_raw = hwnd.0 as usize;
                         std::thread::Builder::new()
-                            .name("vpn-monitor-settings".into())
+                            .name("lattice-settings".into())
                             .spawn(move || {
                                 let overlay_hwnd = HWND(overlay_hwnd_raw as *mut _);
                                 let mut dlg =
@@ -878,7 +878,7 @@ unsafe extern "system" fn window_proc(
                     }
                     tray::IDM_OPEN_LOG_DIR => {
                         if let Some(d) = dirs::data_dir() {
-                            let log_dir = d.join("Vpn_Monitor");
+                            let log_dir = d.join("Lattice");
                             tray::open_external(&log_dir);
                         }
                     }

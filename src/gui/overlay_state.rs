@@ -2,7 +2,7 @@
 //!
 //! 为什么独立成文件而不写 `config.toml`：用户每次拖动都要刷盘，频繁覆盖
 //! 主配置会丢注释、丢顺序。这里用一个独立的小 JSON 文件，写错也不影响
-//! 主配置。文件路径：`%APPDATA%\Vpn_Monitor\overlay_state.json`。
+//! 主配置。文件路径：`%APPDATA%\Lattice\overlay_state.json`。
 
 use std::path::PathBuf;
 
@@ -25,7 +25,7 @@ pub struct OverlayPersistedState {
 
 pub fn default_state_path() -> Option<PathBuf> {
     let data = dirs::data_dir()?;
-    Some(data.join("Vpn_Monitor").join("overlay_state.json"))
+    Some(data.join("Lattice").join("overlay_state.json"))
 }
 
 pub fn load() -> OverlayPersistedState {

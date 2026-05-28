@@ -1,4 +1,4 @@
-# Vpn_Monitor
+# Lattice
 
 Windows 11 平台上的 IP 状态悬浮窗 + 系统监控工具，Rust 实现，零运行时依赖，单文件 exe。
 后台轮询公网 IP / 归属地 / 系统资源，悬浮条置顶常驻显示。通过托盘菜单、全局热键、可视化设置对话框进行交互。
@@ -16,7 +16,7 @@ Windows 11 平台上的 IP 状态悬浮窗 + 系统监控工具，Rust 实现，
 - **第三行**（仅 detailed）：国家分布堆叠条 + top-3 legend + 全宽双折线流量曲线（近 60 个采样点）
 - 窗口宽度自适应内容，每行内容水平居中；长文字自动截断
 - **可拖动**：默认未锁定时左键按住浮窗任意位置可拖到屏幕任意角落；位置自动持久化
-- **位置记忆**：`%APPDATA%\Vpn_Monitor\overlay_state.json` 保存窗口位置 + 锁定状态
+- **位置记忆**：`%APPDATA%\Lattice\overlay_state.json` 保存窗口位置 + 锁定状态
 - **多显示器 / 高 DPI**：按所在显示器工作区居中，响应 `WM_DPICHANGED` / `WM_DISPLAYCHANGE`
 - **周期性强制置顶**：3 秒重新断言 `HWND_TOPMOST`，对抗全屏程序 / UAC 抢占
 
@@ -143,18 +143,18 @@ cargo build              # 调试编译
 cargo build --release    # 发布编译（约 2.5MB 单文件 exe）
 ```
 
-编译产物：`target/release/vpn-monitor.exe`。
+编译产物：`target/release/lattice.exe`。
 `build.rs` 在编译期把 `assets/app.svg` 光栅化为多尺寸 .ico 并嵌入 exe 资源段。
 
 ## 使用方法
 
-1. 双击 `vpn-monitor.exe` 运行
+1. 双击 `lattice.exe` 运行
 2. 屏幕顶部出现悬浮条 + 系统托盘出现盾形图标
 3. 通过托盘右键菜单或全局热键交互
 
 ## 配置文件
 
-路径：与 `vpn-monitor.exe` 同目录的 `config.toml`，首次启动自动生成。
+路径：与 `lattice.exe` 同目录的 `config.toml`，首次启动自动生成。
 
 **编辑方式**（推荐顺序）：
 1. 托盘 → "高级设置..." 可视化编辑（保留注释，部分字段立即生效）
@@ -186,9 +186,9 @@ cargo build --release    # 发布编译（约 2.5MB 单文件 exe）
 
 | 路径 | 内容 |
 |---|---|
-| `%APPDATA%\Vpn_Monitor\geo_cache.json` | IP→Geo LRU 缓存（本工具写入） |
-| `%APPDATA%\Vpn_Monitor\overlay_state.json` | 浮窗位置 + 锁定状态（本工具写入） |
-| `%APPDATA%\Vpn_Monitor\vpn-monitor.log` | 启用日志后写到这里（5MB 轮换，本工具写入） |
+| `%APPDATA%\Lattice\geo_cache.json` | IP→Geo LRU 缓存（本工具写入） |
+| `%APPDATA%\Lattice\overlay_state.json` | 浮窗位置 + 锁定状态（本工具写入） |
+| `%APPDATA%\Lattice\lattice.log` | 启用日志后写到这里（5MB 轮换，本工具写入） |
 | `~/.cc-switch/cc-switch.db` | cc-switch 写入；本工具只读做用量统计 |
 | `~/.cc-switch/settings.json` | cc-switch 写入；本工具只读做多源探测 |
 | `~/.claude/settings.json` | Claude Code / cc-switch 写入；本工具只读拿 `env.ANTHROPIC_MODEL` |
@@ -197,14 +197,14 @@ cargo build --release    # 发布编译（约 2.5MB 单文件 exe）
 
 - 托盘右键 → 退出
 - 快捷键 `Ctrl+Alt+Shift+K`
-- 命令行 `taskkill /IM vpn-monitor.exe`
+- 命令行 `taskkill /IM lattice.exe`
 
 ## 技术栈
 
 - **语言**：Rust 2021
 - **Workspace 双 crate**：
-  - `vpn-monitor-core`（lib）—— 平台无关，Linux/macOS 上 `cargo build -p vpn-monitor-core` 也能编
-  - `vpn-monitor`（binary）—— Windows 桌面 GUI 壳
+  - `lattice-core`（lib）—— 平台无关，Linux/macOS 上 `cargo build -p lattice-core` 也能编
+  - `lattice`（binary）—— Windows 桌面 GUI 壳
 - **GUI**：Win32 API 直调（`windows-rs` crate，无 winit / egui 依赖）
 - **HTTP**：`reqwest` + `rustls` TLS
 - **异步**：`tokio` 多线程运行时（IP/Geo/RPC/泄漏检测）+ 独立 OS 线程跑系统监控和 TCP 表扫描

@@ -1,4 +1,4 @@
-﻿# Vpn_Monitor - Windows IP 状态悬浮窗应用设计文档
+﻿# Lattice - Windows IP 状态悬浮窗应用设计文档
 
 ## 1. 项目概述
 
@@ -217,7 +217,7 @@ main()
 ### 5.3 请求策略
 
 - 超时: 5 秒
-- User-Agent: `VpnMonitor/1.0`
+- User-Agent: `Lattice/1.0`
 - 查询间隔: 默认 30 秒 (可配置 10s ~ 300s)
 - IP 未变化时跳过归属地查询
 - 连续失败 3 次后指数退避 (30s → 60s → 120s → 300s 上限)
@@ -305,7 +305,7 @@ main()
 
 ## 7. 配置文件
 
-路径: `%APPDATA%\Vpn_Monitor\config.toml`
+路径: `%APPDATA%\Lattice\config.toml`
 
 ```toml
 [general]
@@ -412,7 +412,7 @@ struct AppConfig {
 
 ```
 HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
-  Vpn_Monitor = "C:\Program Files\Vpn_Monitor\vpn-monitor.exe"
+  Lattice = "C:\Program Files\Lattice\lattice.exe"
 ```
 
 ### 退出方式
@@ -422,8 +422,8 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
 | 方式 | 操作 |
 |------|------|
 | 快捷键退出 | `Ctrl+Alt+Shift+K` |
-| 任务管理器 | 在"详细信息"页中结束 `vpn-monitor.exe` 进程 |
-| 命令行 | `taskkill /IM vpn-monitor.exe` |
+| 任务管理器 | 在"详细信息"页中结束 `lattice.exe` 进程 |
+| 命令行 | `taskkill /IM lattice.exe` |
 
 ---
 
@@ -431,7 +431,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
 
 ```toml
 [package]
-name = "vpn-monitor"
+name = "lattice"
 version = "0.1.0"
 edition = "2024"
 
@@ -481,7 +481,7 @@ cargo build
 cargo build --release
 
 # 目标文件位置
-# target/release/vpn-monitor.exe  (~2MB，静态链接，无运行时依赖)
+# target/release/lattice.exe  (~2MB，静态链接，无运行时依赖)
 ```
 
 发布为单个 `.exe`，无需安装。用户放入任意目录，双击或加入开机自启即可。

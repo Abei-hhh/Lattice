@@ -51,7 +51,7 @@ pub struct AppConfig {
     /// still shows the real names — only the log file is affected.
     #[serde(default = "default_true")]
     pub mask_geo_in_log: bool,
-    /// Cache Geo lookups to disk (~appdata/Vpn_Monitor/geo_cache.json) so
+    /// Cache Geo lookups to disk (~appdata/Lattice/geo_cache.json) so
     /// returning to a known node shows the city instantly without re-querying.
     #[serde(default = "default_true")]
     pub geo_cache_enabled: bool,
@@ -176,7 +176,7 @@ pub fn config_path() -> PathBuf {
     exe_dir.join("config.toml")
 }
 
-const DEFAULT_CONFIG: &str = r#"# Vpn_Monitor 配置文件
+const DEFAULT_CONFIG: &str = r#"# Lattice 配置文件
 # 修改后重启程序生效
 
 check_interval = 10         # IP 检测间隔（秒），延迟也随此周期测量

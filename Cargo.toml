@@ -15,13 +15,13 @@ dirs = "5"
 
 # ── 主 binary（Windows 桌面 GUI 壳）─────────────────────────────
 [package]
-name = "vpn-monitor"
+name = "lattice"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 # 共享 core（平台无关：网络 / 缓存 / 配置 / runtime flags / cc-switch）
-vpn-monitor-core = { path = "crates/core" }
+lattice-core = { path = "crates/core" }
 
 windows = { version = "0.59", features = [
     "Win32_Foundation",

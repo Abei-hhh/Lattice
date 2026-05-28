@@ -74,7 +74,7 @@ async fn fetch_v6_country(client: &Client, timeout: Duration) -> Option<String> 
     let ip = time::timeout(timeout, async {
         client
             .get("https://api6.ipify.org")
-            .header("User-Agent", "VpnMonitor/1.0")
+            .header("User-Agent", "Lattice/1.0")
             .send()
             .await
             .ok()?
@@ -109,7 +109,7 @@ async fn fetch_dns_country(client: &Client, timeout: Duration) -> Option<String>
     let text = time::timeout(timeout, async {
         client
             .get("https://1.1.1.1/cdn-cgi/trace")
-            .header("User-Agent", "VpnMonitor/1.0")
+            .header("User-Agent", "Lattice/1.0")
             .send()
             .await
             .ok()?

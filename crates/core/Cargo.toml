@@ -1,5 +1,5 @@
 [package]
-name = "vpn-monitor-core"
+name = "lattice-core"
 version = "0.1.0"
 edition = "2021"
 description = "平台无关核心：IP/Geo 抓取与缓存、cc-switch 多源读取、TOML 配置、运行时标志位"

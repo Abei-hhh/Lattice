@@ -1,4 +1,4 @@
-//! vpn-monitor-core —— 平台无关的核心 crate。
+//! lattice-core —— 平台无关的核心 crate。
 //!
 //! 这个 crate 把可以在 Windows / Linux / macOS / Android / iOS 上不加修改运行的
 //! 所有逻辑集中起来，便于未来支持多端时各平台只写 GUI 壳。

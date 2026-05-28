@@ -265,7 +265,7 @@ async fn lookup_ip_api(client: &Client, ip: &str, timeout: Duration) -> Provider
     let result = time::timeout(timeout, async {
         client
             .get(&url)
-            .header("User-Agent", "VpnMonitor/1.0")
+            .header("User-Agent", "Lattice/1.0")
             .send()
             .await
     })
@@ -317,7 +317,7 @@ async fn lookup_ipwho_is(client: &Client, ip: &str, timeout: Duration) -> Provid
     let result = time::timeout(timeout, async {
         client
             .get(&url)
-            .header("User-Agent", "VpnMonitor/1.0")
+            .header("User-Agent", "Lattice/1.0")
             .send()
             .await
     })

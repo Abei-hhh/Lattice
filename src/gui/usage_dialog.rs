@@ -13,7 +13,7 @@ use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
-use vpn_monitor_core::usage::{format_cost, format_tokens, list_usage_breakdown, UsageRow};
+use lattice_core::usage::{format_cost, format_tokens, list_usage_breakdown, UsageRow};
 
 const ID_RADIO_5H: usize = 401;
 const ID_RADIO_24H: usize = 402;
@@ -53,10 +53,10 @@ impl UsageDialog {
 
     pub fn show(&mut self, parent: HWND) {
         unsafe {
-            let hmodule = GetModuleHandleA(windows::core::s!("vpn-monitor.exe"))
+            let hmodule = GetModuleHandleA(windows::core::s!("lattice.exe"))
                 .unwrap_or_default();
             let hinstance: HINSTANCE = hmodule.into();
-            let class_name = w!("VpnMonitorUsage");
+            let class_name = w!("LatticeUsage");
 
             let app_icon = LoadIconW(Some(hinstance), windows::core::PCWSTR(1 as *const _))
                 .unwrap_or_default();
@@ -141,7 +141,7 @@ unsafe fn dialog_ptr(hwnd: HWND) -> *mut UsageDialog {
 unsafe fn create_controls(hwnd: HWND) -> LRESULT {
     let dlg_ptr = dialog_ptr(hwnd);
     if dlg_ptr.is_null() { return LRESULT(0); }
-    let hinst: HINSTANCE = GetModuleHandleA(windows::core::s!("vpn-monitor.exe"))
+    let hinst: HINSTANCE = GetModuleHandleA(windows::core::s!("lattice.exe"))
         .unwrap_or_default().into();
 
     // 顶部警示行 —— 提醒用户表内数字为本地估算，可能与 Anthropic console

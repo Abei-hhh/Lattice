@@ -142,10 +142,10 @@ impl SettingsDialog {
 
     pub fn show(&mut self, parent: HWND) {
         unsafe {
-            let hmodule = GetModuleHandleA(windows::core::s!("vpn-monitor.exe"))
+            let hmodule = GetModuleHandleA(windows::core::s!("lattice.exe"))
                 .unwrap_or_default();
             let hinstance: HINSTANCE = hmodule.into();
-            let class_name = w!("VpnMonitorSettings");
+            let class_name = w!("LatticeSettings");
 
             let app_icon = LoadIconW(Some(hinstance), windows::core::PCWSTR(1 as *const _))
                 .unwrap_or_default();
@@ -263,7 +263,7 @@ unsafe fn create_all_controls(hwnd: HWND) -> LRESULT {
     if dlg_ptr.is_null() {
         return LRESULT(0);
     }
-    let hinst: HINSTANCE = GetModuleHandleA(windows::core::s!("vpn-monitor.exe"))
+    let hinst: HINSTANCE = GetModuleHandleA(windows::core::s!("lattice.exe"))
         .unwrap_or_default()
         .into();
 
@@ -296,7 +296,7 @@ unsafe fn create_all_controls(hwnd: HWND) -> LRESULT {
     add_edit(hwnd, hinst, ID_OPACITY, 220, 88, 80, &format!("{:.2}", cfg.opacity));
 
     add_check(hwnd, hinst, ID_CLICK_THROUGH, "鼠标穿透 ⚠ 开启后无法拖动 (会自动锁定位置；想再拖动请在托盘解锁)", 30, 130, cfg.click_through);
-    add_check(hwnd, hinst, ID_ENABLE_LOG, "启用日志（写到 %APPDATA%\\Vpn_Monitor）", 30, 160, cfg.enable_log);
+    add_check(hwnd, hinst, ID_ENABLE_LOG, "启用日志（写到 %APPDATA%\\Lattice）", 30, 160, cfg.enable_log);
 
     // 主题 radio 组 —— 与 cc-switch 那组用不同 WS_GROUP 分隔
     add_label(hwnd, hinst, label_id(ID_THEME_SYSTEM), "主题:", 30, 200);

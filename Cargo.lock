@@ -823,6 +823,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "dirs",
+ "embed-resource",
+ "lattice-core",
+ "reqwest",
+ "resvg",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tiny-skia",
+ "tokio",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "tracing-subscriber",
+ "usvg",
+ "windows 0.59.0",
+]
+
+[[package]]
+name = "lattice-core"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1966,44 +2004,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "vpn-monitor"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "dirs",
- "embed-resource",
- "reqwest",
- "resvg",
- "serde",
- "serde_json",
- "sysinfo",
- "tiny-skia",
- "tokio",
- "toml",
- "toml_edit",
- "tracing",
- "tracing-subscriber",
- "usvg",
- "vpn-monitor-core",
- "windows 0.59.0",
-]
-
-[[package]]
-name = "vpn-monitor-core"
-version = "0.1.0"
-dependencies = [
- "dirs",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "toml",
- "tracing",
-]
 
 [[package]]
 name = "vswhom"

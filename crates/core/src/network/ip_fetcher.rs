@@ -196,7 +196,7 @@ pub async fn fetch_public_ip(client: &Client, timeout: Duration) -> IpFetchOutco
                 let result = time::timeout(timeout, async {
                     let resp = client
                         .get(url)
-                        .header("User-Agent", "VpnMonitor/1.0")
+                        .header("User-Agent", "Lattice/1.0")
                         .send()
                         .await?;
                     let status = resp.status().as_u16();

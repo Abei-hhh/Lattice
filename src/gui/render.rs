@@ -3,10 +3,10 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 
 use crate::network::geo_lookup::GeoInfo;
-use vpn_monitor_core::network::leak_check::LeakReport;
-use vpn_monitor_core::proxy_rpc::ProxyRpcSnapshot;
-use vpn_monitor_core::runtime::RuntimeFlags;
-use vpn_monitor_core::usage::UsageStats;
+use lattice_core::network::leak_check::LeakReport;
+use lattice_core::proxy_rpc::ProxyRpcSnapshot;
+use lattice_core::runtime::RuntimeFlags;
+use lattice_core::usage::UsageStats;
 
 use super::theme::Theme;
 

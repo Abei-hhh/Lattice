@@ -125,7 +125,7 @@ fn check_proxy_ports() -> bool {
     for &port in PROXY_PORTS {
         let found = found.clone();
         let h = std::thread::Builder::new()
-            .name("vpn-monitor-portscan".into())
+            .name("lattice-portscan".into())
             .spawn(move || {
                 if found.load(Ordering::Relaxed) {
                     return;
