@@ -96,69 +96,6 @@ fn reg_pac_url() -> bool {
     }
 }
 
-fn reg_proxy_server() -> Option<String> {
-    unsafe {
-        let subkey = windows::core::w!("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings");
-        let value = windows::core::w!("ProxyServer");
-        let mut buf = [0u16; 512];
-        let mut size = (buf.len() * 2) as u32;
-        let mut dtype = 0u32;
-        let ok = RegGetValueW(
-            HKEY_CURRENT_USER,
-            subkey.as_ptr(),
-            value.as_ptr(),
-            RRF_RT_REG_SZ,
-            &mut dtype,
-            buf.as_mut_ptr() as *mut u8,
-            &mut size,
-        ) == 0;
-        if !ok || size <= 2 {
-            return None;
-        }
-        let len = (size / 2) as usize;
-        let raw = String::from_utf16_lossy(&buf[..len.saturating_sub(1)]);
-        let trimmed = raw.trim().trim_end_matches('\0').to_string();
-        if trimmed.is_empty() { None } else { Some(trimmed) }
-    }
-}
-
-fn parse_proxy_server(s: &str) -> Option<String> {
-    if s.contains('=') {
-        let mut http_v = None;
-        let mut https_v = None;
-        let mut socks_v = None;
-        for part in s.split(';') {
-            let part = part.trim();
-            if let Some(rest) = part.strip_prefix("https=") {
-                https_v = Some(rest.trim().to_string());
-            } else if let Some(rest) = part.strip_prefix("http=") {
-                http_v = Some(rest.trim().to_string());
-            } else if let Some(rest) = part.strip_prefix("socks=") {
-                socks_v = Some(rest.trim().to_string());
-            }
-        }
-        if let Some(hp) = https_v.or(http_v) {
-            return Some(format!("http://{}", hp));
-        }
-        if let Some(hp) = socks_v {
-            return Some(format!("socks5://{}", hp));
-        }
-        return None;
-    }
-    Some(format!("http://{}", s))
-}
-
-/// 读 Windows 注册表里的系统代理（HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings）
-/// 并转成 reqwest 能识别的 URL。仅在 `ProxyEnable=1` 且 `ProxyServer` 非空时返回。
-/// PAC（`AutoConfigURL`）此处不支持，会返回 None —— reqwest 无 PAC 解释器。
-pub fn read_system_proxy_url() -> Option<String> {
-    if !reg_proxy_enable() {
-        return None;
-    }
-    let server = reg_proxy_server()?;
-    parse_proxy_server(&server)
-}
-
 // ── Port scan ─────────────────────────────────────────────────────
 
 /// Proxy-specific ports. We deliberately **omit** ports that commonly collide

@@ -83,7 +83,7 @@ impl UsageDialog {
                 w!("AI 用量明细 (cc-switch)"),
                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_VISIBLE | WS_SIZEBOX
                     | WS_MAXIMIZEBOX | WS_MINIMIZEBOX,
-                CW_USEDEFAULT, CW_USEDEFAULT, 900, 480,
+                CW_USEDEFAULT, CW_USEDEFAULT, 900, 504,
                 Some(parent), None, Some(hinstance),
                 Some(self as *mut Self as *mut _),
             ) {
@@ -144,12 +144,18 @@ unsafe fn create_controls(hwnd: HWND) -> LRESULT {
     let hinst: HINSTANCE = GetModuleHandleA(windows::core::s!("vpn-monitor.exe"))
         .unwrap_or_default().into();
 
-    // 顶部 4 个 radio
-    add_label(hwnd, hinst, "时间范围:", 10, 14);
-    add_radio(hwnd, hinst, ID_RADIO_5H, "最近 5 小时", 80, 12, true);
-    add_radio(hwnd, hinst, ID_RADIO_24H, "最近 24 小时", 200, 12, false);
-    add_radio(hwnd, hinst, ID_RADIO_7D, "最近 7 天", 320, 12, false);
-    add_radio(hwnd, hinst, ID_RADIO_30D, "最近 30 天", 420, 12, false);
+    // 顶部警示行 —— 提醒用户表内数字为本地估算，可能与 Anthropic console
+    // 不一致。整段 cc-switch 本地算量的方向性问题见 CLAUDE.md 搁置段。
+    add_warning(hwnd, hinst,
+        "⚠ 以下数字为本地估算（基于 cc-switch SQLite + jsonl 解析），可能与 Anthropic console 不一致",
+        10, 10, 860);
+
+    // 时间范围 radio 行（整体下移 24px 给警示行留位置）
+    add_label(hwnd, hinst, "时间范围:", 10, 38);
+    add_radio(hwnd, hinst, ID_RADIO_5H, "最近 5 小时", 80, 36, true);
+    add_radio(hwnd, hinst, ID_RADIO_24H, "最近 24 小时", 200, 36, false);
+    add_radio(hwnd, hinst, ID_RADIO_7D, "最近 7 天", 320, 36, false);
+    add_radio(hwnd, hinst, ID_RADIO_30D, "最近 30 天", 420, 36, false);
 
     if let Ok(c) = GetDlgItem(Some(hwnd), ID_RADIO_5H as i32) {
         SendMessageW(c, BM_SETCHECK, Some(WPARAM(BST_CHECKED.0 as usize)), Some(LPARAM(0)));
@@ -159,7 +165,7 @@ unsafe fn create_controls(hwnd: HWND) -> LRESULT {
         WS_EX_CLIENTEDGE, WC_LISTVIEWW, w!(""),
         WS_VISIBLE | WS_CHILD | WS_TABSTOP
             | WINDOW_STYLE(LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS),
-        10, 45, 860, 360,
+        10, 69, 860, 360,
         Some(hwnd), Some(HMENU(ID_LISTVIEW as *mut _)),
         Some(hinst), None,
     ).unwrap_or_default();
@@ -178,7 +184,7 @@ unsafe fn create_controls(hwnd: HWND) -> LRESULT {
     let _ = CreateWindowExW(
         WINDOW_EX_STYLE::default(), w!("BUTTON"), w!("关闭"),
         WS_VISIBLE | WS_CHILD | WS_TABSTOP | super::md3::BS_OWNERDRAW_STYLE,
-        780, 415, 90, 30,
+        780, 439, 90, 30,
         Some(hwnd), Some(HMENU(ID_CLOSE_BTN as *mut _)),
         Some(hinst), None,
     );
@@ -201,6 +207,18 @@ unsafe fn add_label(parent: HWND, hinst: HINSTANCE, text: &str, x: i32, y: i32) 
         PCWSTR(w.as_ptr()),
         WS_VISIBLE | WS_CHILD,
         x, y, 70, 20,
+        Some(parent), None, Some(hinst), None,
+    );
+}
+
+unsafe fn add_warning(parent: HWND, hinst: HINSTANCE, text: &str, x: i32, y: i32, width: i32) {
+    let w: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let _ = CreateWindowExW(
+        WINDOW_EX_STYLE::default(),
+        windows::core::w!("STATIC"),
+        PCWSTR(w.as_ptr()),
+        WS_VISIBLE | WS_CHILD,
+        x, y, width, 20,
         Some(parent), None, Some(hinst), None,
     );
 }
@@ -308,7 +326,7 @@ unsafe fn layout(hwnd: HWND) {
     let h = rect.bottom;
 
     let _ = SetWindowPos((*dlg_ptr).list_hwnd, None,
-        10, 45, w - 20, h - 100, SWP_NOZORDER | SWP_NOACTIVATE);
+        10, 69, w - 20, h - 124, SWP_NOZORDER | SWP_NOACTIVATE);
     if let Ok(close) = GetDlgItem(Some(hwnd), ID_CLOSE_BTN as i32) {
         let _ = SetWindowPos(close, None,
             w - 100, h - 40, 90, 30, SWP_NOZORDER | SWP_NOACTIVATE);

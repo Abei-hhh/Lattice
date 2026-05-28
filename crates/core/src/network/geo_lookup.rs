@@ -18,6 +18,12 @@ use tokio::time;
 pub struct GeoInfo {
     #[serde(default)]
     pub country: String,
+    /// ISO 3166-1 alpha-2 国别码（"US" / "JP" / "CN" ...）。
+    /// 用于跨源稳健比较 —— `country` 字段在不同语言下文案不同
+    /// （ip-api lang=zh-CN 给 "美国"，ipwho.is 给 "United States"，
+    /// Cloudflare trace 给 "US"），直接比较会假阳性。
+    #[serde(default)]
+    pub country_code: String,
     #[serde(default)]
     pub region: String,
     #[serde(default)]
@@ -87,6 +93,8 @@ struct IpApiResponse {
     status: String,
     message: Option<String>,
     country: Option<String>,
+    #[serde(rename = "countryCode")]
+    country_code: Option<String>,
     #[serde(rename = "regionName")]
     region_name: Option<String>,
     city: Option<String>,
@@ -98,6 +106,7 @@ struct IpWhoIsResponse {
     success: Option<bool>,
     message: Option<String>,
     country: Option<String>,
+    country_code: Option<String>,
     region: Option<String>,
     city: Option<String>,
     connection: Option<IpWhoIsConnection>,
@@ -281,6 +290,7 @@ async fn lookup_ip_api(client: &Client, ip: &str, timeout: Duration) -> Provider
     match resp.json::<IpApiResponse>().await {
         Ok(data) if data.status == "success" => ProviderOutcome::Ok(GeoInfo {
             country: data.country.unwrap_or_default(),
+            country_code: data.country_code.unwrap_or_default().to_uppercase(),
             region: data.region_name.unwrap_or_default(),
             city: data.city.unwrap_or_default(),
             isp: data.isp.unwrap_or_default(),
@@ -332,6 +342,7 @@ async fn lookup_ipwho_is(client: &Client, ip: &str, timeout: Duration) -> Provid
     match resp.json::<IpWhoIsResponse>().await {
         Ok(data) if data.success.unwrap_or(false) => ProviderOutcome::Ok(GeoInfo {
             country: data.country.unwrap_or_default(),
+            country_code: data.country_code.unwrap_or_default().to_uppercase(),
             region: data.region.unwrap_or_default(),
             city: data.city.unwrap_or_default(),
             isp: data.connection.and_then(|c| c.isp).unwrap_or_default(),

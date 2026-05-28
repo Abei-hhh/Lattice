@@ -67,7 +67,25 @@ pub struct HistoryEntry {
 
 impl GeoCache {
     pub fn new(path: PathBuf, ttl_hours: u64, max_entries: usize) -> Self {
-        let loaded = load_from_disk(&path).unwrap_or_default();
+        let mut loaded = load_from_disk(&path).unwrap_or_default();
+        // 一次性丢弃 `country_code` 缺失的旧条目（GeoInfo 加 ISO 码字段
+        // 之前写入的）。这些条目会让泄漏检测拿到空字符串、被上层 filter
+        // 掉，导致 v6/DNS 泄漏徽章在 TTL 期内（最长 7 天）持续假阴。
+        // 下次 poll 命中同 /24 时 fresh lookup 会重新填充并写盘。
+        let before = loaded.entries.len();
+        loaded.entries.retain(|_, e| {
+            e.geo.country.is_empty() || !e.geo.country_code.is_empty()
+        });
+        let dropped = before - loaded.entries.len();
+        if dropped > 0 {
+            let valid: std::collections::HashSet<&String> =
+                loaded.entries.keys().collect();
+            loaded.lru.retain(|k| valid.contains(k));
+            tracing::info!(
+                "Geo cache: dropped {} legacy entries without country_code",
+                dropped
+            );
+        }
         tracing::info!(
             "Geo cache loaded: {} entries from {:?}",
             loaded.entries.len(),

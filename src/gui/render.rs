@@ -341,18 +341,21 @@ fn format_usage_segment(
     window_secs: u64,
     limit_requests: u64,
 ) -> String {
+    // 百分比 / 计数前的 `~` 表示本地估算（基于 cc-switch SQLite + jsonl 解析的
+    // 近似算法），可能与 Anthropic console 数字不一致。详见 CLAUDE.md
+    // "AI 用量计算 — 已搁置" 段。
     let countdown = format_reset_countdown(oldest_unix, window_secs);
     if limit_requests > 0 {
         let pct = ((req as f64 / limit_requests as f64) * 100.0).round() as i32;
         if countdown.is_empty() {
-            format!("{}:{}%", label, pct)
+            format!("{}:~{}%", label, pct)
         } else {
-            format!("{}:{}% {}", label, pct, countdown)
+            format!("{}:~{}% {}", label, pct, countdown)
         }
     } else if countdown.is_empty() {
-        format!("{} {}req", label, req)
+        format!("{} ~{}req", label, req)
     } else {
-        format!("{} {}req {}", label, req, countdown)
+        format!("{} ~{}req {}", label, req, countdown)
     }
 }
 

@@ -28,11 +28,10 @@ Vpn_Monitor/
 │               ├── geo_cache.rs    ← /24 网段 LRU 磁盘缓存
 │               └── leak_check.rs   ← DNS / IPv6 泄漏检测（v6 IP + Cloudflare /cdn-cgi/trace）
 ├── src/                    ← Windows 桌面 binary（GUI 壳 + 平台特定监控）
-│   ├── main.rs                 ← 单实例守卫、tokio runtime、6 个后台 task；
+│   ├── main.rs                 ← 单实例守卫、tokio runtime、后台 task；
 │   │                             `pub use vpn_monitor_core::{...}` 让 gui/ 子模块继续用
 │   │                             `crate::config::*` 等路径无需大改
 │   ├── monitor.rs              ← Win32 注册表代理检测、端口并发扫描、GetLastInputInfo 空闲探测
-│   ├── tcp_table.rs            ← GetExtendedTcpTable 拿活跃 TCP 远端 IP → GeoCache 反查国家分布
 │   └── gui/                    ← 全 Win32 UI（详见下文）
 ├── assets/app.svg          ← 应用图标源文件
 └── build.rs                ← 编译期 SVG → 多尺寸 .ico → embed-resource 链接进 exe 资源段
@@ -43,13 +42,13 @@ Vpn_Monitor/
 | 文件 | 职责 |
 |---|---|
 | `window.rs` | 悬浮窗主消息循环（MsgWaitForMultipleObjectsEx + mpsc 轮询）；Arc<WindowContext>；WM_NCHITTEST 拖动；WM_EXITSIZEMOVE 位置持久化；WM_POWERBROADCAST 唤醒；WM_APP_TRAY 路由；全菜单 WM_COMMAND |
-| `render.rs` | GDI 渲染；支持 simple/detailed 两种形态；row2 system/usage 双模式；detailed 模式右侧 sparkline + 国家分布堆叠条 |
+| `render.rs` | GDI 渲染；双行布局；row2 system/usage 双模式；usage 数字加 `~` 前缀标注为本地估算 |
 | `theme.rs` | Light/Dark 色板 + 系统主题探测（HKCU AppsUseLightTheme）+ DwmSetWindowAttribute dark caption 助手 |
 | `md3.rs` | MD3 风格 owner-draw 按钮（RoundRect + 主题色 + 焦点描边） |
 | `hotkey.rs` | RegisterHotKey / UnregisterHotKey（三个全局热键） |
 | `overlay_state.rs` | 浮窗位置 + 锁定状态持久化到 overlay_state.json（独立于 config.toml） |
 | `tray.rs` | Shell_NotifyIconW 托盘图标 + 两层右键菜单 + ShellExecuteW 辅助 |
-| `history_dialog.rs` | IP 历史时间线 ListView 窗口：搜索 / 右键复制·删除 / CSV 导出（已移除"双击重查"，因 lookup_dialog 已删） |
+| `history_dialog.rs` | IP 历史时间线 ListView 窗口：搜索 / 右键复制·删除 / CSV 导出 |
 | `settings_dialog.rs` | 高级设置 5-Tab 对话框：全字段编辑，toml_edit 保留注释，分立即生效/重启生效 |
 | `usage_dialog.rs` | AI 用量明细窗口：4 时段 radio + ListView（工具/Provider/模型/请求数/Tok/费用/延迟） |
 
@@ -86,6 +85,7 @@ Vpn_Monitor/
 
 **搁置期内代码状态**：
 - `crates/core/src/usage.rs::analyze_5h_block` / `compute_eta` / `humanize_model_name` 全部保留作为 fallback；可继续显示但准确度有限
+- **UI 已加近似标注**：浮窗 row2 usage 模式百分比 / 计数前加 `~` 前缀（"5h: ~42%"）；用量明细对话框顶部一行 "⚠ 以下数字为本地估算..." static text。两处都在提醒用户当前数字与官方可能不一致，等方案 B 落地再去掉
 - 当 cc-switch 未运行 / 未安装时，AI 相关 UI 全部隐藏（见下文"cc-switch 可用性检测"）
 
 ## 关键设计决策
@@ -216,7 +216,6 @@ Vpn_Monitor/
 - 菜单结构：
   - **二级子菜单**（CreatePopupMenu + AppendMenuW(MF_POPUP)）：
     - `显示设置 ▸` —— 显示浮窗 / 锁定位置 / 鼠标穿透
-    - `浮窗形态 ▸` —— 简易 / 完整（含流量曲线）
     - `第二行模式 ▸` —— 系统资源 / AI 用量
     - `隐私 & 缓存 ▸` —— 日志掩码 IP / 日志掩码归属地 / 启用归属地缓存 / HTTPS 跨源校验
     - `文件 ▸` —— 打开 config.toml / 打开日志目录
@@ -276,7 +275,6 @@ Vpn_Monitor/
 - 固定双行：`WIN_HEIGHT = ROW_HEIGHT * 2 = 56`。ROW_HEIGHT = 28 给呼吸感
 - Row 1：状态点 + Claude tag + IP + 归属地 + 延迟 + 代理节点 + 泄漏徽章
 - Row 2：可在 `system`（↑↓+CPU+内存）/ `usage`（AI 用量）之间切换 —— 见下
-- 历史上曾有 `detailed` 形态展示流量曲线 + 国家分布堆叠条，因低价值已移除（连带删除 `src/tcp_table.rs` / `traffic_history` / `traffic_by_country` / `IDM_FORM_*` / RuntimeFlags.overlay_form）
 
 ### Row 2 双模式（system / usage）
 - `row2_mode` 字段 + RuntimeFlags.row2_mode 热切换
@@ -341,17 +339,10 @@ Vpn_Monitor/
 - 后台 task 每 5s 探测一次，写到 `OverlayState.proxy_rpc: Option<ProxyRpcSnapshot>`
 - UI 表现：浮窗第一行尾部用 `→ {节点名}` 绿色标签替代原 `未设置代理` 文本（节点名通常自带 emoji 国旗）
 
-### 流量分流可视化（src/tcp_table.rs）
-- Win32 `GetExtendedTcpTable(TCP_TABLE_BASIC_CONNECTIONS, AF_INET)` 拿所有 IPv4 TCP 连接
-- 只看 ESTABLISHED (state = 5) 的远端 IP，去重后按 GeoCache 命中聚合国家
-- 跳过私有/CGNAT/loopback（10.0.0.0/8、172.16/12、192.168/16、100.64/10、127.0.0.0/8）
-- 未命中 cache 的远端 IP 归到"未知"桶
-- top_n=5 之外的国家合并到"其它"桶
-- 独立 OS 线程每 10s 扫一次 → 写到 `OverlayState.traffic_by_country`
-- UI 只在 detailed 形态显示（堆叠条）
-
 ### 用量明细窗口（usage_dialog.rs）
 - 顶部 4 个 radio：最近 5h / 24h / 7d / 30d，切换即重新 SQL GROUP BY 查询
+- 顶部加一行 "⚠ 以下数字为本地估算..." static text，与 row2 usage 的 `~` 前缀
+  呼应，提醒用户这些数字与 Anthropic console 可能不一致（详见下一段 "AI 用量计算 — 已搁置"）
 - ListView 列：工具 / Provider / 模型 / 请求数 / 输入 Tok（K/M 短形）/ 输出 Tok / 费用 USD / 平均延迟
 - 按 cost 降序，所有 provider × model 组合全部列出
 - 同 cc-switch SQLite 只读打开，对 cc-switch 写入零影响
@@ -368,7 +359,6 @@ Vpn_Monitor/
 | **用量统计刷新** | usage_refresh_interval (30s) | 读 cc-switch SQLite 5h+周用量 |
 | **代理 RPC 探测** | 5s | Clash/sing-box 当前节点名 |
 | **泄漏检测** | 120s | DNS / v6 泄漏 |
-| **TCP 表扫描**（OS 线程） | 10s | 国家分布（detailed 模式专用） |
 
 ## 常用命令
 
@@ -385,7 +375,7 @@ cargo build --release      # 发布编译（~2.5MB 单文件 exe，含 toml_edit
 
 | 用途       | URL                                      | 响应   |
 | ---------- | ---------------------------------------- | ------ |
-| 获取 IP    | `https://api.ipify.org` / `api.ip.sb/ip` / `ifconfig.me/ip` | 纯文本 |
+| 获取 IP    | `https://api.ipify.org` / `icanhazip.com` / `ifconfig.co/ip` | 纯文本 |
 | 归属地     | `http://ip-api.com/json/{ip}?lang=zh-CN` | JSON   |
 | 备用归属地 | `https://ipwho.is/{ip}`                  | JSON   |
 
@@ -432,7 +422,6 @@ cargo build --release      # 发布编译（~2.5MB 单文件 exe，含 toml_edit
 | `geo_cross_check` | true | 跨源（HTTPS/HTTP）国别校验 | ✅ |
 | `theme` | "system" | UI 主题：system / light / dark | ✅ |
 | `active_cc_switch_provider` | "claude" | 浮窗左上 tag 显示哪个 cc-switch 工具的模型 | ✅ |
-| `overlay_form` | "simple" | 浮窗形态：simple（双行）/ detailed（双行 + 流量曲线 + 国家分布） | ✅（托盘菜单） |
 | `row2_mode` | "system" | 第二行：system（↑↓+CPU+内存）/ usage（主模型+5h+周 用量） | ✅（托盘菜单） |
 | `usage_refresh_interval` | 30 | cc-switch SQLite 用量读取间隔（秒），0 关闭 | 重启 |
 | `usage_5h_limit_requests` | 50 | 5h 滚动窗口**用户消息数**上限（Anthropic Pro 真实配额；Max 改 250）；0 关闭百分比 | 重启 |

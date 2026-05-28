@@ -570,7 +570,9 @@ fn main() {
             // 启动后稍等一下让 IP 轮询拿到 v4 country
             tokio::time::sleep(Duration::from_secs(15)).await;
             loop {
-                let v4_country = {
+                // 必须传 ISO2 country_code（不是 country 全名）—— 三个泄漏维度都
+                // 在 ISO 码层面比较，否则中文/英文长名永远 != "US" 之类的 ISO 码。
+                let v4_cc = {
                     let s = match leak_state.lock() {
                         Ok(g) => g,
                         Err(p) => p.into_inner(),
@@ -578,11 +580,12 @@ fn main() {
                     s.current_update
                         .geo
                         .as_ref()
-                        .map(|g| g.country.clone())
+                        .map(|g| g.country_code.clone())
+                        .filter(|c| !c.is_empty())
                 };
                 let report = vpn_monitor_core::network::leak_check::check_leaks(
                     &leak_client,
-                    v4_country.as_deref(),
+                    v4_cc.as_deref(),
                     Duration::from_secs(3),
                 )
                 .await;

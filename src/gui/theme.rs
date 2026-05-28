@@ -31,9 +31,11 @@ pub struct Theme {
     pub bg: COLORREF,
     /// surface（卡片、按钮 idle 等比 bg 微亮 / 微暗的一层）
     pub surface: COLORREF,
-    /// surface hover 态
+    /// surface hover 态 (reserved — 待 Wave 4 给 MD3 按钮加 TrackMouseEvent + subclass 后启用)
+    #[allow(dead_code)]
     pub surface_hover: COLORREF,
-    /// surface 按下态
+    /// surface 按下态 (reserved — 同上，目前 md3::draw_button 直接对 surface 做 darken 0.85)
+    #[allow(dead_code)]
     pub surface_pressed: COLORREF,
     /// 主要文本（最高对比）
     pub fg_primary: COLORREF,

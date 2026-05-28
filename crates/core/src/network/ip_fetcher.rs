@@ -12,10 +12,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time;
 
+// 三源并发，任一成功即返回。全部 HTTPS —— HTTP 明文在某些代理 / Clash 全局模式
+// 下会被节点拒绝或被广告/反劫持规则误杀，导致"浏览器能上但本工具超时"。
+//
+// 已剔除：
+//   - api.ip.sb        Cloudflare WAF 对劣质节点 IP 频繁挂 403 / 长挂起
+//   - ifconfig.me      多数海外节点限速，且在部分代理出口被识别为爬虫源
+//   - ipinfo.io/ip     未鉴权 ~1000/day 软限，10s 轮询 + 三源并发半小时内撞 429
+// 当前选择（全部无显式 day-quota）：
+//   - api.ipify.org    全球可达，HTTPS 稳，纯文本响应
+//   - icanhazip.com    Cloudflare 维护，HTTPS，无显式 quota，纯文本响应
+//   - ifconfig.co/ip   HTTPS，ifconfig.me 的现代替代，纯文本响应
 const IP_SOURCES: &[&str] = &[
     "https://api.ipify.org",
-    "https://api.ip.sb/ip",
-    "https://ifconfig.me/ip",
+    "https://icanhazip.com",
+    "https://ifconfig.co/ip",
 ];
 
 /// Runtime-toggleable mask flags. Default true (safest); the tray menu and
@@ -216,13 +227,22 @@ pub async fn fetch_public_ip(client: &Client, timeout: Duration) -> IpFetchOutco
 
     let mut saw_rate_limit = false;
     let mut reasons: Vec<FailReason> = Vec::new();
-    for (url, task) in tasks {
-        match task.await {
+    // 顺序 await 每个 task；首个 Ok 返回时 abort 剩余 JoinHandle ——
+    // tokio 中 drop JoinHandle 不会中止任务，剩余 HTTPS 请求会跑完，
+    // 这对带 day-quota 的源等同于每轮白白消耗一次配额。
+    let total = tasks.len();
+    for idx in 0..total {
+        let url = tasks[idx].0;
+        let result = (&mut tasks[idx].1).await;
+        match result {
             Ok(SourceResult::Ok(ip, latency_ms)) => {
                 tracing::info!(
                     "Public IP {} fetched from {} in {}ms",
                     mask_ip(&ip), url, latency_ms
                 );
+                for (_, t) in &tasks[idx + 1..] {
+                    t.abort();
+                }
                 return IpFetchOutcome::Ok {
                     ip,
                     source: url,

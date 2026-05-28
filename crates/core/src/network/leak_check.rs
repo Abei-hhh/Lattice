@@ -40,11 +40,12 @@ impl LeakReport {
     }
 }
 
-/// 并发跑三个独立探测，2-3 秒内出报告。`v4_country` 由调用方传入
-/// （避免重复抓 v4 IP，那块 IP 轮询已经做了）。
+/// 并发跑三个独立探测，2-3 秒内出报告。`v4_country_code` 由调用方传入
+/// （避免重复抓 v4 IP，那块 IP 轮询已经做了），**必须是 ISO 3166-1 alpha-2 二字母码**
+/// （"US" / "JP" / "CN"），否则会与 dns_country（Cloudflare 也返回 ISO2）比较失败 → 假阳性。
 pub async fn check_leaks(
     client: &Client,
-    v4_country: Option<&str>,
+    v4_country_code: Option<&str>,
     timeout: Duration,
 ) -> LeakReport {
     let (v6, dns) = tokio::join!(
@@ -52,7 +53,7 @@ pub async fn check_leaks(
         fetch_dns_country(client, timeout),
     );
 
-    let v4_norm = v4_country.map(|s| normalize_country(s));
+    let v4_norm = v4_country_code.map(normalize_country);
     let v6_norm = v6.as_ref().map(|s| normalize_country(s));
     let dns_norm = dns.as_ref().map(|s| normalize_country(s));
 
@@ -60,7 +61,7 @@ pub async fn check_leaks(
     let dns_leak = matches!((&v4_norm, &dns_norm), (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() && a != b);
 
     LeakReport {
-        v4_country: v4_country.map(String::from),
+        v4_country: v4_country_code.map(String::from),
         v6_country: v6,
         v6_leak,
         dns_country: dns,
@@ -91,10 +92,11 @@ async fn fetch_v6_country(client: &Client, timeout: Duration) -> Option<String> 
         return None; // 不是合法 v6 → 该机器无 v6
     }
 
-    // 拿到 v6 IP → 用归属地查询拿国别
+    // 拿到 v6 IP → 用归属地查询拿 ISO 码（用 country_code 而非 country 全名，
+    // 后续与 Cloudflare trace 的 loc=XX 直接做 ISO 对 ISO 比较）。
     match super::geo_lookup::lookup_geo(client, &ip, timeout, false).await {
         super::geo_lookup::GeoLookupOutcome::Ok { geo, .. } => {
-            if geo.country.is_empty() { None } else { Some(geo.country) }
+            if geo.country_code.is_empty() { None } else { Some(geo.country_code) }
         }
         _ => None,
     }
@@ -131,16 +133,10 @@ async fn fetch_dns_country(client: &Client, timeout: Duration) -> Option<String>
     None
 }
 
-/// 国别字符串归一化：去空格、转大写。
-/// ip-api 返回 "United States"，ipwho.is 返回 "United States"，Cloudflare 返回 "US"。
-/// 简单策略：取前 2 个字符大写 —— 大多数情况下能匹配 ISO 码。
-/// 若 country 是中文/全名则保留全文，让上层比较失败时也能在日志里看清差异。
+/// ISO 码归一化：去空格、转大写。
+/// 三个数据源现在统一传 ISO2 进来（v4: GeoInfo.country_code、v6: 同源、dns: Cloudflare loc）
+/// —— 这里只需做大小写 / 空白容错。历史上这里有 bug：曾接受 "美国" / "United States" 这类
+/// 长名，导致与 Cloudflare 的 "US" 永远不等 → 假阳性 DNS 泄漏。详见 check_leaks 文档。
 fn normalize_country(s: &str) -> String {
-    let trimmed = s.trim();
-    if trimmed.len() <= 3 {
-        trimmed.to_uppercase()
-    } else {
-        // ip-api 返回长名时也接受全名比较 —— 留给调用方决定
-        trimmed.to_uppercase()
-    }
+    s.trim().to_uppercase()
 }
