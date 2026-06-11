@@ -3,6 +3,7 @@
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use clap::Parser;
@@ -86,6 +87,48 @@ fn try_focus_existing_instance() -> bool {
 fn read_active_source_label(source: &str) -> String {
     let label = cc_switch::read_label(source);
     if label.is_empty() { "Claude".to_string() } else { label }
+}
+
+/// 构造 reqwest::Client —— 关键三项：
+/// - `connect_timeout(3s)`：连接阶段独立预算；池里复用到死 socket 时，握手
+///   阶段就 3s 内失败，不会拖到 `timeout` 把全 5s 耗光显示"超时"。
+/// - `pool_idle_timeout(20s)`：把"死连接被复用"的窗口压到 20s 以内 ——
+///   Clash 切节点 / NAT 表项老化场景下，绝大多数请求看到的是全新 socket。
+/// - `tcp_keepalive(15s)`：OS 主动探活，对端没了立刻返 Connect 错误而不是
+///   无声超时。HTTPS 长 idle 时尤其关键。
+///
+/// 没有这三项时观感是："命令行 curl / 浏览器都通，但浮窗反复显示超时；
+/// 杀进程重启又好"—— 因为重启是隐式的"清池"。
+fn build_http_client(timeout_secs: u64, proxy: Option<&str>) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(3))
+        .pool_idle_timeout(Duration::from_secs(20))
+        .tcp_keepalive(Duration::from_secs(15))
+        .user_agent("Lattice/1.0");
+
+    if let Some(p_url) = proxy {
+        match reqwest::Proxy::all(p_url) {
+            Ok(p) => builder = builder.proxy(p),
+            Err(e) => {
+                tracing::warn!(
+                    "Invalid proxy config '{}': {}",
+                    ip_fetcher::mask_proxy_url(p_url),
+                    e
+                );
+            }
+        }
+    }
+
+    builder.build()
+}
+
+/// 从 `Arc<RwLock<reqwest::Client>>` 安全读取当前 client 的克隆。
+/// reqwest::Client 内部本就是 Arc 共享，clone 极轻；锁只保护 swap。
+/// 中毒锁走 `into_inner()` 兜底，与项目其他锁保持一致行为。
+fn clone_current_client(shared: &Arc<RwLock<reqwest::Client>>) -> reqwest::Client {
+    let g = shared.read().unwrap_or_else(|p| p.into_inner());
+    g.clone()
 }
 
 #[derive(Parser)]
@@ -229,32 +272,19 @@ fn main() {
     let persisted = gui::overlay_state::load();
     let runtime_flags = RuntimeFlags::from_config(&config, persisted.locked);
 
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(config.timeout))
-        .user_agent("Lattice/1.0");
-
-    if let Some(proxy) = &config.proxy {
-        match reqwest::Proxy::all(proxy) {
-            Ok(p) => {
-                client_builder = client_builder.proxy(p);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Invalid proxy config '{}': {}",
-                    ip_fetcher::mask_proxy_url(proxy),
-                    e
-                );
-            }
-        }
-    }
-
-    let client = match client_builder.build() {
+    let client = match build_http_client(config.timeout, config.proxy.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             show_error_dialog(&format!("无法创建 HTTP 客户端: {}", e));
             return;
         }
     };
+
+    // 共享 client 包成 Arc<RwLock<>>：所有后台 task 每次迭代前 read+clone 一份
+    // 当前的 client 来发请求；唤醒/代理翻转事件下，IP 轮询任务会 write 一个全新
+    // client 进去 —— 旧的 drop = 整个连接池里的 idle socket 立即释放，等价于
+    // "杀进程重启"那一刻的清池效果，但用户感知是无缝的。
+    let shared_client: Arc<RwLock<reqwest::Client>> = Arc::new(RwLock::new(client));
 
     let claude_model = read_active_source_label(&config.active_cc_switch_provider);
 
@@ -274,10 +304,13 @@ fn main() {
     let (update_tx, update_rx) = mpsc::unbounded_channel::<UiUpdate>();
 
     // IP poll task
-    let poll_client = client.clone();
+    let poll_shared = shared_client.clone();
     let check_interval = config.check_interval;
     let max_retries = config.max_retries;
     let ip_timeout = Duration::from_secs(config.timeout);
+    // 重建 client 时用到的最小参数集合 —— 拷贝出来，避免把整个 config 搬进闭包。
+    let rebuild_timeout = config.timeout;
+    let rebuild_proxy = config.proxy.clone();
     // Geo lookups get a tighter timeout than IP fetch so a slow provider
     // doesn't keep the city blank: providers race concurrently, and 3s is
     // enough for both ip-api.com and ipwho.is on a healthy link.
@@ -312,6 +345,9 @@ fn main() {
             poll_count += 1;
             tracing::info!("[poll#{}] === 开始第 {} 次检测 ===", poll_count, poll_count);
 
+            // 每轮 fresh clone 一份当前 client —— 这样 notify 分支替换 shared 之后，
+            // 下一轮立刻拿到的就是新 client，不会还指着旧池。
+            let poll_client = clone_current_client(&poll_shared);
             let outcome = ip_fetcher::fetch_public_ip(&poll_client, ip_timeout).await;
 
             match outcome {
@@ -490,7 +526,23 @@ fn main() {
             tokio::select! {
                 _ = &mut sleep => {}
                 _ = ip_check_notify_for_poll.notified() => {
-                    tracing::info!("[poll#{}] 收到外部触发信号，立即重查", poll_count + 1);
+                    tracing::info!("[poll#{}] 收到外部触发信号，重建 HTTP 客户端并立即重查", poll_count + 1);
+                    // 重建 client：旧 Arc 引用计数清零 → 整个 hyper 连接池
+                    // (含所有 idle TCP/TLS socket) 立即释放。
+                    // 触发场景：
+                    //   • WM_POWERBROADCAST: 笔记本唤醒，旧 socket 是 NAT 死路
+                    //   • monitor_loop_sync 代理翻转: 旧池里是上一节点的连接
+                    // 这是"杀进程重启就好"现象的根治。
+                    match build_http_client(rebuild_timeout, rebuild_proxy.as_deref()) {
+                        Ok(new_c) => {
+                            let mut g = poll_shared.write().unwrap_or_else(|p| p.into_inner());
+                            *g = new_c;
+                            tracing::info!("HTTP 客户端已重建，连接池已清空");
+                        }
+                        Err(e) => {
+                            tracing::warn!("重建 HTTP 客户端失败，保留旧实例: {}", e);
+                        }
+                    }
                     // Force geo re-check on next iteration even if IP appears
                     // unchanged — e.g. after proxy toggle, we want fresh geo.
                     last_ip = None;
@@ -562,13 +614,14 @@ fn main() {
         .ok();
 
     // 代理 RPC 探测 task（Clash / Mihomo / sing-box 当前节点名）
-    // 间隔 5s 足够 —— 切节点不是常态操作。client_clone 与 IP 轮询共享同一个
-    // reqwest::Client，连接池复用。
+    // 间隔 5s 足够 —— 切节点不是常态操作。从 shared_client 每轮拿当前 client，
+    // 这样 IP 轮询那边重建时本 task 下一轮也立刻用上新连接池。
     {
         let rpc_state = state.clone();
-        let rpc_client = client.clone();
+        let rpc_shared = shared_client.clone();
         rt.spawn(async move {
             loop {
+                let rpc_client = clone_current_client(&rpc_shared);
                 let snap = lattice_core::proxy_rpc::detect(&rpc_client).await;
                 if let Ok(mut s) = rpc_state.lock() {
                     s.proxy_rpc = snap;
@@ -582,11 +635,12 @@ fn main() {
     // 用最新的 v4 country 作为基准对比。
     {
         let leak_state = state.clone();
-        let leak_client = client.clone();
+        let leak_shared = shared_client.clone();
         rt.spawn(async move {
             // 启动后稍等一下让 IP 轮询拿到 v4 country
             tokio::time::sleep(Duration::from_secs(15)).await;
             loop {
+                let leak_client = clone_current_client(&leak_shared);
                 // 必须传 ISO2 country_code（不是 country 全名）—— 三个泄漏维度都
                 // 在 ISO 码层面比较，否则中文/英文长名永远 != "US" 之类的 ISO 码。
                 let v4_cc = {

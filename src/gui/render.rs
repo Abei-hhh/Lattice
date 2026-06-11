@@ -244,15 +244,11 @@ fn measure_row1(hdc: HDC, state: &OverlayState) -> i32 {
         x += txt_width(hdc, "未设置代理") + 6;
     }
 
-    // 泄漏徽章
+    // 泄漏徽章（仅 v6；DNS 维度已删除，详见 leak_check.rs 头注）
     if let Some(leak) = &state.leak {
         if leak.v6_leak {
             x += 8;
             x += txt_width(hdc, "[v6泄漏]") + 6;
-        }
-        if leak.dns_leak {
-            x += 8;
-            x += txt_width(hdc, "[DNS泄漏]") + 6;
         }
     }
 
@@ -510,16 +506,11 @@ pub fn paint_overlay(hwnd: HWND, state: &OverlayState, width: i32, height: i32) 
             row1_tail_x = draw_text(hdc, "未设置代理", x + 12, 0, ROW_HEIGHT, th.fg_dim, max_x);
         }
 
-        // 泄漏徽章（红色突出）
+        // 泄漏徽章（红色突出；仅 v6，DNS 维度已删除）
         if let Some(leak) = &state.leak {
             if leak.v6_leak {
                 row1_tail_x = draw_text(
                     hdc, "[v6泄漏]", row1_tail_x + 8, 0, ROW_HEIGHT, th.accent_red, max_x,
-                );
-            }
-            if leak.dns_leak {
-                row1_tail_x = draw_text(
-                    hdc, "[DNS泄漏]", row1_tail_x + 8, 0, ROW_HEIGHT, th.accent_red, max_x,
                 );
             }
         }

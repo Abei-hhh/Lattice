@@ -3,13 +3,19 @@
 //! 跑在专属 OS 线程上（不是 tokio worker），因为端口扫描和
 //! `refresh_processes` 是同步阻塞 syscall，跑在 tokio 上会卡住 IP 轮询。
 //!
-//! **代理检测三层**（按可信度从高到低）：
-//! 1. 注册表 `ProxyEnable` / `AutoConfigURL`
-//! 2. 已知代理进程名（Clash / V2Ray / Sing-Box 等）
-//! 3. 代理专用端口监听（剔除了 8080 / 9090 等易冲突端口）
+//! **代理检测四层**（按可信度从高到低）：
+//! 1. **默认路由走虚拟网卡** (TUN 模式最权威信号) —— `GetAdaptersAddresses`
+//!    枚举活跃接口，匹配 wintun / TAP-Windows / WireGuard / Clash / Mihomo /
+//!    sing-box 等虚拟适配器描述。TUN 模式下 ProxyEnable=0 + 端口常关，仅靠
+//!    进程名容易跟不上 GUI 包装的子进程命名变化
+//! 2. 注册表 `ProxyEnable` / `AutoConfigURL` —— 系统代理模式权威信号
+//! 3. 已知代理进程名（Clash / V2Ray / Sing-Box 等）
+//! 4. 代理专用端口监听（剔除了 8080 / 9090 等易冲突端口）
 //!
-//! **代理状态翻转**：检测到变化时通过 `proxy_change_notify.notify_one()`
-//! 通知 IP 轮询任务立即重查，无需等下一个 tick。
+//! **代理状态翻转 + 抖动抑制**：检测到变化后**不立即** notify，要求**连续两次
+//! 探测都保持新状态**才 `proxy_change_notify.notify_one()`。这样代理工具切换
+//! 模式时的"短暂重启 core 进程"(1-3 秒进程不在 → 端口不在 → 注册表瞬间清零)
+//! 不会触发误重建 HTTP client + 误报 DNS / 归属地异常。
 //!
 //! **空闲降频**：`GetLastInputInfo` 探测用户空闲秒数，超过阈值时所有
 //! 间隔乘以 `idle_multiplier`，AFK 时降低 CPU/电量消耗。
@@ -190,14 +196,120 @@ fn check_proxy_processes(sys: &System) -> bool {
     false
 }
 
+// ── TUN / virtual adapter detection ───────────────────────────────
+
+/// 虚拟网卡名片关键词（小写匹配，case-insensitive 子串）。
+/// 命中任一即视为代理工具的 TUN 接管。
+///
+/// **顺序与稳定性约束**：列表里全是设备 *Description*（驱动注册名），不是
+/// FriendlyName（用户可改）；所以这些关键字在 OS 层稳定。`wintun` /
+/// `tap-windows` 是事实标准；`wireguard tunnel` 给 WireGuard 原生客户端；
+/// 其余 `clash` / `mihomo` / `sing-box` 给一些发行版自带的命名。
+const VIRTUAL_ADAPTER_KEYWORDS: &[&str] = &[
+    "wintun",          // Mihomo / Clash Verge / sing-box 默认 TUN 驱动
+    "tap-windows",     // OpenVPN / 老版 Clash 的 TAP 驱动
+    "tap windows",     // 同上，空格变体
+    "wireguard tunnel", // WireGuard 原生 Windows 客户端
+    "openvpn data channel offload", // OpenVPN DCO
+    "clash",           // Clash Verge / Clash for Windows 自家命名
+    "mihomo",
+    "sing-box",
+];
+
+/// 通过 `GetAdaptersAddresses` 枚举所有活跃接口，检查是否存在 **状态为 Up 且
+/// description 命中虚拟网卡关键词** 的适配器。
+///
+/// 这是 TUN 模式最权威的信号 —— 即便代理工具关掉了系统代理（ProxyEnable=0）、
+/// 关掉了 HTTP/SOCKS 端口、用了 GUI 包装让进程名变形，**虚拟网卡只要起来了
+/// 流量就在走它**，骗不了。
+///
+/// 失败安静返回 false，由上层 fallback 到其它三层检测。
+fn detect_tun_adapter() -> bool {
+    use windows::Win32::NetworkManagement::IpHelper::{
+        GetAdaptersAddresses, GET_ADAPTERS_ADDRESSES_FLAGS, IP_ADAPTER_ADDRESSES_LH,
+        GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_DNS_SERVER,
+    };
+    use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+    use windows::Win32::Networking::WinSock::AF_UNSPEC;
+
+    // 第一次调用先问需要多大缓冲（标准模式：buffer=null 则 OS 把 size 写回去）。
+    // ERROR_BUFFER_OVERFLOW (111) 是预期返回值，意味着 "把 buffer 准备到 size 字节"。
+    let mut size: u32 = 16 * 1024; // 16KB 起步，多数机器一次过
+    let mut buf: Vec<u8> = vec![0u8; size as usize];
+
+    let flags: GET_ADAPTERS_ADDRESSES_FLAGS = GET_ADAPTERS_ADDRESSES_FLAGS(
+        GAA_FLAG_SKIP_ANYCAST.0 | GAA_FLAG_SKIP_MULTICAST.0 | GAA_FLAG_SKIP_DNS_SERVER.0,
+    );
+
+    // 最多两次尝试：第一次若返回 ERROR_BUFFER_OVERFLOW，按 OS 写回的 size 扩容再试。
+    for _attempt in 0..2 {
+        let ret = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC.0 as u32,
+                flags,
+                None,
+                Some(buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+                &mut size,
+            )
+        };
+        // ERROR_SUCCESS = 0
+        if ret == 0 {
+            break;
+        }
+        // ERROR_BUFFER_OVERFLOW = 111；按新 size 扩容重试
+        if ret == 111 {
+            buf.resize(size as usize, 0);
+            continue;
+        }
+        // 其它错误码（NO_DATA=232 表示无适配器，NOT_ENOUGH_MEMORY=8 等）静默失败
+        return false;
+    }
+
+    let mut cur = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+    while !cur.is_null() {
+        let adapter = unsafe { &*cur };
+        // 仅检查 Up 状态的接口；DOWN/UNKNOWN 的虚拟网卡不算 TUN 已接管。
+        if adapter.OperStatus == IfOperStatusUp {
+            // Description 是 PWSTR (null-terminated UTF-16)
+            let desc = pwstr_to_lower_string(adapter.Description);
+            if !desc.is_empty() && VIRTUAL_ADAPTER_KEYWORDS.iter().any(|k| desc.contains(k)) {
+                tracing::debug!("TUN adapter detected: {}", desc);
+                return true;
+            }
+        }
+        cur = adapter.Next as *const _;
+    }
+    false
+}
+
+/// PWSTR → 小写 String。空指针 / 空字符串 → 空 String。
+fn pwstr_to_lower_string(p: windows::core::PWSTR) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    unsafe {
+        while *p.0.add(len) != 0 {
+            len += 1;
+            if len > 4096 { return String::new(); } // 保险栏：避免越界扫
+        }
+        let slice = std::slice::from_raw_parts(p.0, len);
+        String::from_utf16_lossy(slice).to_lowercase()
+    }
+}
+
 // ── Combined detection ────────────────────────────────────────────
 
-/// Tiered detection:
-/// 1. Registry ProxyEnable / PAC URL — definitive system-proxy signal.
-/// 2. Known proxy process running — reliable when system proxy is off but a
-///    tunnel client is active (e.g. TUN mode).
-/// 3. Proxy-specific port listening — supplemental.
+/// Tiered detection (按可信度高 → 低):
+/// 1. **默认路由走虚拟网卡 (TUN)** —— `GetAdaptersAddresses` 找到 Up 状态的
+///    wintun / TAP / WireGuard / Clash / Mihomo / sing-box 等适配器
+/// 2. Registry ProxyEnable / PAC URL — definitive system-proxy signal
+/// 3. Known proxy process running — reliable when 1+2 都没命中（GUI 启动中等）
+/// 4. Proxy-specific port listening — supplemental
 fn detect_proxy_active(sys: &System) -> bool {
+    if detect_tun_adapter() {
+        return true;
+    }
     if reg_proxy_enable() || reg_pac_url() {
         return true;
     }
@@ -260,6 +372,15 @@ pub fn monitor_loop_sync(
     };
     let mut proxy_check_count: u32 = 0;
 
+    // ── 抖动抑制 ───────────────────────────────────────────────
+    // 代理工具切模式（规则↔全局）时常会重启 core 进程，1-3s 内 ProxyEnable=0、
+    // 进程不在、端口不在 → 误判为"未开启代理" → notify_one → 误重建 HTTP
+    // client → 误报 DNS/归属地异常。修法：状态翻转需**连续两次同新状态**
+    // 才算确认；中间反弹回旧状态则清零。
+    let mut pending_state: Option<bool> = None;
+    let mut pending_streak: u32 = 0;
+    const STREAK_REQUIRED: u32 = 2;
+
     loop {
         let mult = current_idle_multiplier(idle_threshold_seconds, idle_multiplier);
         std::thread::sleep(Duration::from_secs(monitor_interval * mult));
@@ -297,15 +418,39 @@ pub fn monitor_loop_sync(
         if proxy_check_count >= proxy_ticks {
             proxy_check_count = 0;
             refresh_processes_name_only(&mut sys);
-            let new_state = detect_proxy_active(&sys);
-            if new_state != proxy_enabled {
-                tracing::info!(
-                    "Proxy state changed: {} → {}, signalling immediate IP re-check",
-                    proxy_enabled, new_state
-                );
-                proxy_change_notify.notify_one();
+            let observed = detect_proxy_active(&sys);
+
+            if observed == proxy_enabled {
+                // 回到稳态：清掉等待确认的反向 streak。例如代理工具刚重启完
+                // 状态回正，之前累积的 "下→上" pending 直接作废，避免下次回到
+                // "下" 时被错误地一次性确认。
+                pending_state = None;
+                pending_streak = 0;
+            } else {
+                // 与当前稳态不同：累积 streak；要求连续 STREAK_REQUIRED 次都
+                // 是同一新状态才算真翻转。中间反弹会清零（上一分支兜底）。
+                if pending_state == Some(observed) {
+                    pending_streak += 1;
+                } else {
+                    pending_state = Some(observed);
+                    pending_streak = 1;
+                }
+                if pending_streak >= STREAK_REQUIRED {
+                    tracing::info!(
+                        "Proxy state changed (confirmed after {} ticks): {} → {}, signalling immediate IP re-check",
+                        pending_streak, proxy_enabled, observed
+                    );
+                    proxy_enabled = observed;
+                    pending_state = None;
+                    pending_streak = 0;
+                    proxy_change_notify.notify_one();
+                } else {
+                    tracing::debug!(
+                        "Proxy state flip pending ({}/{}): {} → {}",
+                        pending_streak, STREAK_REQUIRED, proxy_enabled, observed
+                    );
+                }
             }
-            proxy_enabled = new_state;
         }
 
         if tx

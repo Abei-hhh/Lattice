@@ -26,7 +26,7 @@ Lattice/
 │               ├── ip_fetcher.rs   ← 多源并发抓 IP + mask_ip/mask_geo/mask_proxy_url 脱敏
 │               ├── geo_lookup.rs   ← 双 provider 跨源校验
 │               ├── geo_cache.rs    ← /24 网段 LRU 磁盘缓存
-│               └── leak_check.rs   ← DNS / IPv6 泄漏检测（v6 IP + Cloudflare /cdn-cgi/trace）
+│               └── leak_check.rs   ← IPv6 泄漏检测（v6 IP 国别 vs v4 国别；DNS 维度已删除，见 2026-06-11 备注）
 ├── src/                    ← Windows 桌面 binary（GUI 壳 + 平台特定监控）
 │   ├── main.rs                 ← 单实例守卫、tokio runtime、后台 task；
 │   │                             `pub use lattice_core::{...}` 让 gui/ 子模块继续用
@@ -140,7 +140,7 @@ Lattice/
 - **窗口自适应宽度**：每次 update 重测 row1/row2 文本宽，独立水平居中
 - **延迟显示**：抓 IP 时记录耗时；<200ms 青色 / ≥200ms 橙色
 - **网络失败保留上下文**：`CheckStatus::NetworkError` 时仍显示**上次已知**的 IP + 城市（暗色），后接 `网络异常 (原因)`；只有状态点变红
-- **代理检测分层**：注册表 ProxyEnable / PAC URL > 已知代理进程名 > 代理专用端口（已剔除 8080/9090/2080 等易冲突的开发端口）
+- **代理检测分层（四层，2026-06-11 起）**：TUN 虚拟网卡（`GetAdaptersAddresses` 找 Up 状态的 wintun / TAP / WireGuard / Clash / Mihomo / sing-box 适配器，最权威）> 注册表 ProxyEnable / PAC URL > 已知代理进程名 > 代理专用端口（已剔除 8080/9090/2080 等易冲突的开发端口）。TUN 模式下后三项常全为 false，但虚拟网卡只要起来流量就在走它 —— 加入 TUN 检测后，分流模式 / GUI 包装 / 进程改名等场景都能稳定识别
 - **精简归属地**：第一行只显示城市；ISP 仅在查询窗口显示
 
 ### Claude 标签解析（cc-switch 集成）
@@ -168,6 +168,27 @@ Lattice/
   1. **window_proc** WM_POWERBROADCAST（PBT_APMRESUMEAUTOMATIC / RESUMESUSPEND） — 笔记本合盖恢复后立即抓 IP
   2. **monitor_loop_sync** 检测到代理状态翻转时 — 切节点立即反映新 IP
 - 收到 notify 后 `last_ip = None` + `consecutive_failures = 0` + `current_interval` 复位 —— 避免唤醒后立刻显示 NetworkError 红点
+
+### HTTP client 热重建（main.rs `build_http_client` + `Arc<RwLock<Client>>`）
+**问题**：用户长期反馈"命令行 curl / 浏览器都通，但浮窗一直显示超时；杀进程重启又好" —— 根因是 hyper 连接池里残留了唤醒前 / 切节点前的 idle socket：TLS 已建好但对端 NAT 表项失效，复用时握手不出错而 read 卡到超时。重启是隐式清池。
+
+**修法**：
+1. **client builder 三件套**（`build_http_client`）：`connect_timeout(3s)` + `pool_idle_timeout(20s)` + `tcp_keepalive(15s)` —— 连接阶段独立预算 3s；idle socket 最多保留 20s；OS keepalive 15s 主动探活，对端没了立刻返 Connect 错而不是无声超时
+2. **共享 client = `Arc<RwLock<reqwest::Client>>`**：所有后台 task（IP 轮询 / 代理 RPC / 泄漏检测）每轮 read+clone 一份当前 client 用；reqwest::Client 内部本就是 Arc，clone 极轻
+3. **唤醒 / 翻转触发的"原地换池"**：IP 轮询任务收到 `ip_check_notify` 时，先 `build_http_client(...)` 造一个全新 client，再 `*write_guard = new_c` 替换。旧 client 的 Arc 引用计数清零 → 整个 hyper 连接池里的 idle socket 立即释放 —— 等价于"杀进程重启"那一刻的清池效果，但用户无感
+4. 重建失败时只 `tracing::warn!` 保留旧实例，绝不让 main loop 崩
+
+**辅助 helper**：`clone_current_client(&Arc<RwLock<Client>>)` 统一封装"中毒锁 `into_inner()` 兜底 + clone"，与项目其他锁的容错行为一致。
+
+### 代理翻转抖动抑制（monitor.rs `STREAK_REQUIRED = 2`）
+**问题**：代理工具切模式（规则 ↔ 全局 / 直连）时常会重启 core 进程，1-3 秒窗口内 ProxyEnable=0 + 进程不在 + 端口不在 → 旧逻辑立刻 `notify_one()` → 误重建 HTTP client → 用户看到瞬时 DNS / 归属地异常红点。
+
+**修法**：状态翻转需**连续两次同新状态**才算确认 ——
+- 同稳态 → 清空 `pending_state` / `pending_streak`（兜底任意中途反弹）
+- 不同稳态且 == 上次 pending → streak +1；达到 `STREAK_REQUIRED` 才 `notify_one()` + 更新 `proxy_enabled`
+- 不同稳态且 != 上次 pending → 重置 pending 为本次新观测，streak=1
+
+按 monitor 默认 `proxy_check_interval=30s` 计算，确认窗口约 30s ——  刚好覆盖大部分代理工具的 core 重启时长（< 5s），又不至于让真切换感觉迟钝（毕竟下次主 IP 轮询 tick 也要 10s）。
 
 ### Geo 缓存 (`network/geo_cache.rs`)
 - **/24 网段归并**：v4 `a.b.c.0/24`、v6 前 48 位作 key —— 同 ISP 节点池命中率从 ~30% 跃升到 ~80%
@@ -321,16 +342,20 @@ Lattice/
 - 后台 task 每 30s 刷新一次（`usage_refresh_interval`），写到 `OverlayState.usage`
 - 时区策略：window_week 用 "now − 7×24h 滚动"近似（避免引 chrono 到 core），用户感知一致
 
-### DNS / IPv6 泄漏检测（core/network/leak_check.rs）
-- 三路并发探测：
+### IPv6 泄漏检测（core/network/leak_check.rs）
+- 单路探测：
   1. **v4 country**：复用主 IP 轮询拿到的国家
   2. **v6 country**：调 `api6.ipify.org`（强制 v6 路径）拿 v6 IP → geo_lookup 查国家；机器无 v6 → None（不算泄漏）
-  3. **DNS country**：调 `https://1.1.1.1/cdn-cgi/trace`，解析 `loc=XX` 行（Cloudflare 看到的 DNS 解析者 ISO 国别）
-- 短超时（3s），任一失败安静降级为 None
+- 短超时（3s），失败安静降级为 None
 - `v4_country != v6_country`（两者非空）→ `v6_leak = true`
-- `v4_country != dns_country`（两者非空）→ `dns_leak = true`
-- UI 表现：浮窗第一行尾部红色 `[v6泄漏]` / `[DNS泄漏]` 徽章
+- UI 表现：浮窗第一行尾部红色 `[v6泄漏]` 徽章
 - 后台 task 每 2 分钟刷新（leak 不变频繁，节省 HTTPS 开销）
+
+#### DNS 维度删除（2026-06-11）
+- 历史版本通过 `https://1.1.1.1/cdn-cgi/trace` 的 `loc=XX` 判断 DNS 泄漏。该字段反映的是 **Cloudflare 看到的本次 HTTPS 请求源 IP** 的位置，**不是 DNS resolver 的位置**
+- 分流（规则）模式下几乎所有代理工具都把 `1.1.1.1` 列为国内直连段 → trace 走直连返回 `loc=CN`，而 v4 主 IP 走代理 → 稳定假阳性"DNS 泄漏"
+- 真正的 DNS 泄漏检测需要随机子域名 + 服务端配合（dnsleaktest.com 模式），本工具暂不实现
+- 代码层面：`LeakReport.dns_country` / `dns_leak` 字段已删除；`render.rs` 中 `[DNS泄漏]` 徽章绘制路径同步移除
 
 ### Clash / Mihomo / sing-box RPC 集成（core/proxy_rpc.rs）
 - 自动探测 `127.0.0.1:9090`（Clash/Mihomo 默认）→ 9001（fork）→ 6170（sing-box clash-api）
@@ -358,7 +383,7 @@ Lattice/
 | 模型标签刷新 | model_refresh_interval (5s) | 读 cc-switch active provider 当前模型 |
 | **用量统计刷新** | usage_refresh_interval (30s) | 读 cc-switch SQLite 5h+周用量 |
 | **代理 RPC 探测** | 5s | Clash/sing-box 当前节点名 |
-| **泄漏检测** | 120s | DNS / v6 泄漏 |
+| **泄漏检测** | 120s | v6 泄漏（DNS 维度已删除，见 leak_check.rs 头注） |
 
 ## 常用命令
 

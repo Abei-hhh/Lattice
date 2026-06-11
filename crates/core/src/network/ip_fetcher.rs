@@ -27,6 +27,7 @@ const IP_SOURCES: &[&str] = &[
     "https://api.ipify.org",
     "https://icanhazip.com",
     "https://ifconfig.co/ip",
+    "https://ip.me/",
 ];
 
 /// Runtime-toggleable mask flags. Default true (safest); the tray menu and

@@ -6,6 +6,7 @@ Windows 11 平台上的 IP 状态悬浮窗 + 系统监控工具，Rust 实现，
 ## 功能特性
 
 ### 浮窗显示
+
 - 屏幕顶部半透明悬浮条，**两种形态可切换**：
   - **简易（simple）**：双行布局，总高 ~56px
   - **完整（detailed）**：三行布局，总高 ~120px，第三行全宽展示流量曲线 + 国家分布
@@ -21,6 +22,7 @@ Windows 11 平台上的 IP 状态悬浮窗 + 系统监控工具，Rust 实现，
 - **周期性强制置顶**：3 秒重新断言 `HWND_TOPMOST`，对抗全屏程序 / UAC 抢占
 
 ### 托盘图标 + 多层右键菜单
+
 所有可切换的开关都收纳在二级子菜单里，顶层只保留频繁用到的动作项：
 
 ```
@@ -42,7 +44,8 @@ IP 查询...
 所有 ☑ 项立即生效，不需要重启。
 
 ### IP / 归属地探测
-- **多源 IP 抓取**：并发 ipify / ip.sb / ifconfig.me，任一成功立即返回
+
+- **多源 IP 抓取**：并发 ipify / icanhazip / ifconfig.co / ip.me，任一成功立即返回
 - **双源归属地**：ipwho.is（HTTPS）+ ip-api.com（HTTP）并发查询
 - **HTTPS 跨源校验**：两源国家不一致时浮窗显示 ⚠ 橙色警告，**抵御中间人篡改 HTTP 响应伪造归属地**
 - **归属地 LRU 磁盘缓存**：按 /24 子网键缓存 7 天，切回常用 VPN 节点城市瞬间显示
@@ -51,6 +54,7 @@ IP 查询...
 - 连续失败自动指数退避；唤醒 / 代理变化自动触发即时重查
 
 ### 系统监控
+
 - CPU 全局使用率
 - 内存总用量百分比
 - 网络速率（上传 / 下载 KB/s）
@@ -59,13 +63,16 @@ IP 查询...
 - **空闲降频**：用户键鼠空闲 ≥ 阈值时所有轮询间隔 × 5
 
 ### AI 工具标签（cc-switch 多源）
+
 浮窗左上 tag 可显示以下任意 AI CLI 当前选中的 provider 名：
+
 - **Claude**（优先级最高，会读 `~/.claude/settings.json` env.ANTHROPIC_MODEL）
 - Codex / Gemini / OpenCode / Hermes / OpenClaw
 
 在"高级设置..."→ 高级 tab 用 radio 切换源，**立即生效**。
 
 ### AI 用量统计（cc-switch SQLite 集成）
+
 **前提**：已安装 [cc-switch](https://github.com/farion1231/cc-switch) 并启用代理模式，请求会自动落库到 `~/.cc-switch/cc-switch.db`。
 
 - 浮窗第二行切到 "AI 用量" 模式 → 实时显示主用模型 + 5h/周请求数 + 费用
@@ -74,27 +81,35 @@ IP 查询...
   - 按费用降序排序
 
 ### Clash / Mihomo / sing-box 节点名集成
+
 本地代理工具如果暴露了 [Clash API](https://clash.gitbook.io/doc/restful-api)（默认端口 9090），浮窗第一行会用绿色 `→ {节点名}` 替代默认的"未设置代理"文本。
+
 - 支持 Clash / Clash-Meta / Mihomo / sing-box（带 clash-api 兼容层）
 - 自动探测端口 9090 / 9001 / 6170
 - 每 5 秒刷新一次
 
-### DNS + IPv6 泄漏检测
-后台每 2 分钟做三路并发探测：
+### IPv6 泄漏检测
+
+后台每 2 分钟做两路并发探测：
+
 - **v4 国别**：复用主 IP 轮询结果
 - **v6 国别**：调 `api6.ipify.org` 强制走 v6 路径
-- **DNS 国别**：调 `https://1.1.1.1/cdn-cgi/trace` 提取 Cloudflare 看到的 DNS 解析者位置
 
-如果三者国别不一致，浮窗第一行末尾会显示红色 `[v6泄漏]` / `[DNS泄漏]` 徽章。
+若两者国别不一致（机器开了 v6 但代理只接管 v4），浮窗第一行末尾显示红色 `[v6泄漏]` 徽章。
+
+> DNS 泄漏维度已在 2026-06-11 移除：`1.1.1.1/cdn-cgi/trace` 返回的 `loc=` 反映的是 HTTPS 请求源 IP，而非 DNS resolver；在分流模式（1.1.1.1 走直连）下会稳定假阳性。真正的 DNS 泄漏检测需要随机子域名 + 服务端配合，本工具暂不实现。
 
 ### 流量分流可视化（完整形态）
+
 启用完整形态后，浮窗右侧 sparkline 卡片顶部多一条 6px 国家分布堆叠条：
+
 - 用 Win32 `GetExtendedTcpTable` 拿当前所有活跃 TCP 连接的远端 IPv4
 - 配合 `geo_cache` 反查国家 → 按比例堆叠（颜色按国家名 hash → HSV）
 - 每 10 秒扫描一次
 - **回答"我的流量到底有多少出墙"** —— 不依赖 in-app proxy，纯系统级 TCP 表观察
 
 ### 主题
+
 - `system` / `light` / `dark` 三选一
 - `system` 跟随 Win11 个性化设置（`AppsUseLightTheme`），用户切了暗色后浮窗也跟着变
 - 对话框标题栏走 `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)`
@@ -102,6 +117,7 @@ IP 查询...
 - 设置对话框可视化切换，立即生效
 
 ### 历史时间线窗口
+
 - 浏览 GeoCache 累积的所有 IP→Geo 记录（按时间倒序）
 - 搜索框实时过滤（IP / 国家 / 城市 / ISP / 网段任一命中）
 - 双击行 → 以该 IP 打开 lookup 对话框重查（验证缓存是否过期）
@@ -109,16 +125,19 @@ IP 查询...
 - 一键导出 CSV（UTF-8 BOM，Excel 直接打开）
 
 ### 高级设置对话框
+
 5-Tab：**常规 / 网络 / 隐私&安全 / 热键 / 高级**，覆盖 20+ 配置字段。
 保存时用 `toml_edit` **保留 config.toml 中的所有注释和顺序**。
 
 ### 安全 / 隐私
+
 - **日志 IP 掩码**：默认 `1.2.x.x` 形式，浮窗仍显示完整 IP
 - **日志归属地脱敏**：默认 FNV-1a hash 替换（`geo:xxxxxxxx`）
 - **代理 URL 凭证脱敏**：日志中 `socks5://user:pass@host` 自动变 `socks5://***@host`
 - **HTTPS 优先 + 跨源警告**：见上文"跨源校验"
 
 ### 稳定性
+
 - 单实例守卫：命名 mutex + FindWindow 双重检查，二次启动自动激活已有实例
 - 监控线程 `catch_unwind` 兜底，最多自动重启 10 次
 - 启动期失败用 `MessageBoxW` 提示而非闷退
@@ -126,11 +145,12 @@ IP 查询...
 
 ## 快捷键
 
-| 快捷键 | 功能 |
-|--------|------|
-| `Ctrl+Alt+H` | 切换浮窗显示/隐藏 |
-| `Ctrl+Alt+I` | 打开 IP 查询工具窗口 |
-| `Ctrl+Alt+Shift+K` | 退出程序 |
+
+| 快捷键             | 功能                 |
+| ------------------ | -------------------- |
+| `Ctrl+Alt+H`       | 切换浮窗显示/隐藏    |
+| `Ctrl+Alt+I`       | 打开 IP 查询工具窗口 |
+| `Ctrl+Alt+Shift+K` | 退出程序             |
 
 均可在"高级设置 → 热键"tab 改键（需重启生效）。
 
@@ -157,41 +177,44 @@ cargo build --release    # 发布编译（约 2.5MB 单文件 exe）
 路径：与 `lattice.exe` 同目录的 `config.toml`，首次启动自动生成。
 
 **编辑方式**（推荐顺序）：
+
 1. 托盘 → "高级设置..." 可视化编辑（保留注释，部分字段立即生效）
 2. 托盘 → "打开 config.toml" 直接编辑文本（需重启生效）
 
 ### 主要字段（完整列表见 `CLAUDE.md`）
 
-| 字段 | 默认 | 立即生效？ |
-|---|---|---|
-| `theme` | "system" | ✅ |
-| `opacity` | 0.85 | ✅ |
-| `click_through` | false | ✅ |
-| `mask_ip_in_log` | true | ✅ |
-| `mask_geo_in_log` | true | ✅ |
-| `geo_cache_enabled` | true | ✅ |
-| `geo_cross_check` | true | ✅ |
-| `active_cc_switch_provider` | "claude" | ✅ |
-| `overlay_form` | "simple" | ✅（托盘菜单） |
-| `row2_mode` | "system" | ✅（托盘菜单） |
-| `usage_refresh_interval` | 30 秒 | 重启 |
-| `usage_5h_limit_requests` | 50（Pro）/ 250（Max） | 重启 |
-| `usage_week_limit_requests` | 1000（Pro）/ 5000（Max） | 重启 |
-| `check_interval` | 10 秒 | 重启 |
-| `timeout` | 5 秒 | 重启 |
-| `idle_threshold_seconds` | 900 | 重启 |
-| `hotkey_*` | ctrl+alt+h/i/shift+k | 重启 |
+
+| 字段                        | 默认                     | 立即生效？     |
+| --------------------------- | ------------------------ | -------------- |
+| `theme`                     | "system"                 | ✅             |
+| `opacity`                   | 0.85                     | ✅             |
+| `click_through`             | false                    | ✅             |
+| `mask_ip_in_log`            | true                     | ✅             |
+| `mask_geo_in_log`           | true                     | ✅             |
+| `geo_cache_enabled`         | true                     | ✅             |
+| `geo_cross_check`           | true                     | ✅             |
+| `active_cc_switch_provider` | "claude"                 | ✅             |
+| `overlay_form`              | "simple"                 | ✅（托盘菜单） |
+| `row2_mode`                 | "system"                 | ✅（托盘菜单） |
+| `usage_refresh_interval`    | 30 秒                    | 重启           |
+| `usage_5h_limit_requests`   | 50（Pro）/ 250（Max）    | 重启           |
+| `usage_week_limit_requests` | 1000（Pro）/ 5000（Max） | 重启           |
+| `check_interval`            | 10 秒                    | 重启           |
+| `timeout`                   | 5 秒                     | 重启           |
+| `idle_threshold_seconds`    | 900                      | 重启           |
+| `hotkey_*`                  | ctrl+alt+h/i/shift+k     | 重启           |
 
 ### 状态文件
 
-| 路径 | 内容 |
-|---|---|
-| `%APPDATA%\Lattice\geo_cache.json` | IP→Geo LRU 缓存（本工具写入） |
-| `%APPDATA%\Lattice\overlay_state.json` | 浮窗位置 + 锁定状态（本工具写入） |
-| `%APPDATA%\Lattice\lattice.log` | 启用日志后写到这里（5MB 轮换，本工具写入） |
-| `~/.cc-switch/cc-switch.db` | cc-switch 写入；本工具只读做用量统计 |
-| `~/.cc-switch/settings.json` | cc-switch 写入；本工具只读做多源探测 |
-| `~/.claude/settings.json` | Claude Code / cc-switch 写入；本工具只读拿 `env.ANTHROPIC_MODEL` |
+
+| 路径                                   | 内容                                                            |
+| -------------------------------------- | --------------------------------------------------------------- |
+| `%APPDATA%\Lattice\geo_cache.json`     | IP→Geo LRU 缓存（本工具写入）                                  |
+| `%APPDATA%\Lattice\overlay_state.json` | 浮窗位置 + 锁定状态（本工具写入）                               |
+| `%APPDATA%\Lattice\lattice.log`        | 启用日志后写到这里（5MB 轮换，本工具写入）                      |
+| `~/.cc-switch/cc-switch.db`            | cc-switch 写入；本工具只读做用量统计                            |
+| `~/.cc-switch/settings.json`           | cc-switch 写入；本工具只读做多源探测                            |
+| `~/.claude/settings.json`              | Claude Code / cc-switch 写入；本工具只读拿`env.ANTHROPIC_MODEL` |
 
 ## 退出方式
 
